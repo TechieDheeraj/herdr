@@ -103,6 +103,23 @@ impl AppPolicy {
     };
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WorkspaceEmptyClickState {
+    source_id: InputSourceId,
+    row: u16,
+    col: u16,
+    at: Instant,
+}
+
+impl WorkspaceEmptyClickState {
+    fn is_double_click_for(self, next: Self) -> bool {
+        self.source_id == next.source_id
+            && next.at.duration_since(self.at) <= SIDEBAR_DOUBLE_CLICK_WINDOW
+            && self.row.abs_diff(next.row) <= 1
+            && self.col.abs_diff(next.col) <= 1
+    }
+}
+
 pub struct App {
     pub state: AppState,
     pub(crate) pixel_mouse_available: bool,

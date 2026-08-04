@@ -1106,6 +1106,176 @@ impl App {
                     cross_workspace: source_ws_idx != target_ws_idx,
                 }
             }
+            PaneMoveDestination::TabPlacement {
+                tab_id,
+                target_pane_id,
+                placement,
+                moved_ratio,
+            } => {
+                let Some((target_ws_idx, target_tab_idx)) = self.parse_tab_id(&tab_id) else {
+                    return encode_error(id, "tab_not_found", format!("tab {tab_id} not found"));
+                };
+                if self.state.workspaces[target_ws_idx].tabs[target_tab_idx].zoomed {
+                    let Some(source_layout) =
+                        self.pane_layout_snapshot(source_ws_idx, source_tab_idx)
+                    else {
+                        return encode_error(
+                            id,
+                            "pane_layout_unavailable",
+                            "pane layout unavailable",
+                        );
+                    };
+                    let Some(target_layout) =
+                        self.pane_layout_snapshot(target_ws_idx, target_tab_idx)
+                    else {
+                        return encode_error(
+                            id,
+                            "pane_layout_unavailable",
+                            "pane layout unavailable",
+                        );
+                    };
+                    let Some(pane) = self.pane_info(source_ws_idx, source_pane_id) else {
+                        return encode_error(id, "pane_not_found", "source pane not found");
+                    };
+                    return encode_unchanged_pane_move(
+                        id,
+                        PaneMoveReason::ZoomedTab,
+                        previous_pane_id,
+                        previous_workspace_id,
+                        previous_tab_id,
+                        pane,
+                        Some(source_layout),
+                        target_layout,
+                    );
+                }
+                let Some((pane_ws_idx, target_pane_id)) = self.parse_pane_id(&target_pane_id)
+                else {
+                    return encode_error(id, "target_pane_not_found", "target pane not found");
+                };
+                let pane_tab_idx =
+                    self.state.workspaces[pane_ws_idx].find_tab_index_for_pane(target_pane_id);
+                if pane_ws_idx != target_ws_idx || pane_tab_idx != Some(target_tab_idx) {
+                    return encode_error(
+                        id,
+                        "target_pane_not_found",
+                        format!("target pane is not in tab {tab_id}"),
+                    );
+                }
+                let moved_ratio = moved_ratio.unwrap_or(0.5);
+                if source_ws_idx == target_ws_idx && source_tab_idx == target_tab_idx {
+                    if source_pane_id == target_pane_id {
+                        let Some(layout) = self.pane_layout_snapshot(source_ws_idx, source_tab_idx)
+                        else {
+                            return encode_error(
+                                id,
+                                "pane_layout_unavailable",
+                                "pane layout unavailable",
+                            );
+                        };
+                        let Some(pane) = self.pane_info(source_ws_idx, source_pane_id) else {
+                            return encode_error(id, "pane_not_found", "source pane not found");
+                        };
+                        return encode_unchanged_pane_move(
+                            id,
+                            PaneMoveReason::SamePane,
+                            previous_pane_id,
+                            previous_workspace_id,
+                            previous_tab_id,
+                            pane,
+                            None,
+                            layout,
+                        );
+                    }
+
+                    let previous_focus = self.state.current_pane_focus_target();
+                    let changed = self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
+                        .layout
+                        .relocate_pane(source_pane_id, target_pane_id, placement, moved_ratio);
+                    if !changed {
+                        return encode_error(
+                            id,
+                            "pane_move_failed",
+                            "pane could not be repositioned",
+                        );
+                    }
+                    if focus {
+                        self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
+                            .layout
+                            .focus_pane(source_pane_id);
+                        self.state
+                            .switch_workspace_tab(source_ws_idx, source_tab_idx);
+                        self.state.record_pane_focus_change(
+                            previous_focus,
+                            source_ws_idx,
+                            source_pane_id,
+                        );
+                        self.state.settle_terminal_mode_after_focus();
+                    }
+                    self.state.mark_session_dirty();
+                    self.schedule_session_save();
+                    let Some(pane) = self.pane_info(source_ws_idx, source_pane_id) else {
+                        return encode_error(id, "pane_move_failed", "moved pane is unavailable");
+                    };
+                    let Some(target_layout) =
+                        self.pane_layout_snapshot(source_ws_idx, source_tab_idx)
+                    else {
+                        return encode_error(
+                            id,
+                            "pane_layout_unavailable",
+                            "pane layout unavailable",
+                        );
+                    };
+                    let move_result = PaneMoveResult {
+                        changed: true,
+                        reason: None,
+                        previous_pane_id: previous_pane_id.clone(),
+                        previous_workspace_id: previous_workspace_id.clone(),
+                        previous_tab_id: previous_tab_id.clone(),
+                        pane: Box::new(pane.clone()),
+                        source_layout: None,
+                        target_layout: Box::new(target_layout.clone()),
+                        created_workspace: None,
+                        created_tab: None,
+                        closed_workspace_id: None,
+                        closed_tab_id: None,
+                        focused_pane_id: target_layout.focused_pane_id.clone(),
+                    };
+                    self.emit_event(EventEnvelope {
+                        event: EventKind::PaneMoved,
+                        data: EventData::PaneMoved {
+                            previous_pane_id,
+                            previous_workspace_id,
+                            previous_tab_id,
+                            pane: Box::new(pane),
+                            created_workspace: None,
+                            created_tab: None,
+                            closed_workspace_id: None,
+                            closed_tab_id: None,
+                        },
+                    });
+                    self.emit_layout_updated_snapshot(target_layout);
+                    return encode_success(id, ResponseResult::PaneMove { move_result });
+                }
+
+                let target_layout =
+                    &self.state.workspaces[target_ws_idx].tabs[target_tab_idx].layout;
+                if target_layout
+                    .projected_insert(target_pane_id, source_pane_id, placement, moved_ratio)
+                    .is_none()
+                {
+                    return encode_error(id, "pane_move_failed", "target pane could not be split");
+                }
+                let Some(target_tab_id) = self.public_tab_id(target_ws_idx, target_tab_idx) else {
+                    return encode_error(id, "tab_not_found", format!("tab {tab_id} not found"));
+                };
+                ResolvedPaneMoveDestination::ExistingTabPlacement {
+                    tab_id: target_tab_id,
+                    target_pane_id,
+                    placement,
+                    moved_ratio,
+                    cross_workspace: source_ws_idx != target_ws_idx,
+                }
+            }
             PaneMoveDestination::NewTab {
                 workspace_id,
                 label,
@@ -1147,6 +1317,9 @@ impl App {
         let moved = taken.moved;
         let cross_workspace = match &resolved {
             ResolvedPaneMoveDestination::ExistingTab {
+                cross_workspace, ..
+            } => *cross_workspace,
+            ResolvedPaneMoveDestination::ExistingTabPlacement {
                 cross_workspace, ..
             } => *cross_workspace,
             ResolvedPaneMoveDestination::NewTab { workspace_id, .. } => {
@@ -1221,6 +1394,45 @@ impl App {
                         );
                     }
                 };
+                (target_ws_idx, target_tab_idx, moved_pane_id)
+            }
+            ResolvedPaneMoveDestination::ExistingTabPlacement {
+                tab_id,
+                target_pane_id,
+                placement,
+                moved_ratio,
+                cross_workspace: _,
+            } => {
+                let Some((target_ws_idx, target_tab_idx)) = self.parse_tab_id(&tab_id) else {
+                    self.recover_failed_pane_move(recovery_context, moved);
+                    return encode_error(id, "pane_move_failed", "target tab disappeared");
+                };
+                let previous_target_focus = self.state.workspaces[target_ws_idx].tabs
+                    [target_tab_idx]
+                    .layout
+                    .focused();
+                let moved_pane_id = match self.state.workspaces[target_ws_idx].insert_moved_pane_at(
+                    target_tab_idx,
+                    target_pane_id,
+                    moved,
+                    placement,
+                    moved_ratio,
+                ) {
+                    Ok(pane_id) => pane_id,
+                    Err(moved) => {
+                        self.recover_failed_pane_move(recovery_context, moved);
+                        return encode_error(
+                            id,
+                            "pane_move_failed",
+                            "target pane could not be split",
+                        );
+                    }
+                };
+                if !focus {
+                    self.state.workspaces[target_ws_idx].tabs[target_tab_idx]
+                        .layout
+                        .focus_pane(previous_target_focus);
+                }
                 (target_ws_idx, target_tab_idx, moved_pane_id)
             }
             ResolvedPaneMoveDestination::NewTab {
@@ -2226,6 +2438,13 @@ enum ResolvedPaneMoveDestination {
         target_pane_id: PaneId,
         split: crate::api::schema::SplitDirection,
         ratio: f32,
+        cross_workspace: bool,
+    },
+    ExistingTabPlacement {
+        tab_id: String,
+        target_pane_id: PaneId,
+        placement: crate::layout::PanePlacement,
+        moved_ratio: f32,
         cross_workspace: bool,
     },
     NewTab {
@@ -4319,6 +4538,8 @@ mod tests {
         app.state.outer_terminal_focus = Some(false);
 
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let sibling = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
         let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
             .attached_terminal_id
             .clone();
@@ -4326,6 +4547,11 @@ mod tests {
         app.state.workspaces[0].tabs[0]
             .panes
             .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&sibling)
             .unwrap()
             .seen = false;
         app.state.workspaces[0].tabs[0].layout.focus_pane(pane_id);
@@ -4343,6 +4569,7 @@ mod tests {
             panic!("expected pane info response");
         };
         assert_eq!(pane.agent_status, crate::api::schema::AgentStatus::Idle);
+        assert!(!app.state.workspaces[0].tabs[0].panes[&sibling].seen);
     }
 
     #[test]

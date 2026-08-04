@@ -7,6 +7,7 @@ use crate::cli::projection::{Field, Input};
 
 use super::agents::AgentSessionInfo;
 use super::common::{AgentStatus, PaneAgentState, ReadFormat, ReadSource, SplitDirection};
+pub use crate::layout::PanePlacement;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
@@ -101,6 +102,14 @@ pub enum PaneMoveDestination {
         split: SplitDirection,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ratio: Option<f32>,
+    },
+    TabPlacement {
+        tab_id: String,
+        target_pane_id: String,
+        placement: PanePlacement,
+        /// Share of the target split assigned to the moved pane.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        moved_ratio: Option<f32>,
     },
     NewTab {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -510,6 +519,10 @@ pub struct PaneInfo {
     pub restore_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Effective pane name (metadata title, manual label, or generated
+    /// tab-local `pane N` fallback). `label` remains the manual label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -615,6 +628,7 @@ pub struct PaneMoveResult {
 #[serde(rename_all = "snake_case")]
 pub enum PaneMoveReason {
     SameTab,
+    SamePane,
     ZoomedTab,
 }
 

@@ -650,6 +650,17 @@ mod tests {
     }
 
     #[test]
+    fn spec_exposes_four_way_pane_move_placement() {
+        let cmd = super::command();
+        let pane_move = command_path(&cmd, &["pane", "move"]);
+        assert!(has_option(pane_move, "place"));
+        assert_eq!(
+            option_values(pane_move, "place"),
+            ["left", "right", "above", "below"]
+        );
+    }
+
+    #[test]
     fn spec_models_agent_start_target_and_trailing_args() {
         let cmd = super::command();
         let agent_start = command_path(&cmd, &["agent", "start"]);

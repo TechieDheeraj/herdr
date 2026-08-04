@@ -351,6 +351,7 @@ impl App {
                 .map(|cwd| cwd.display().to_string()),
             restore_error: terminal.restore_error.clone(),
             label: terminal.manual_label.clone(),
+            display_label: ws.tabs[tab_idx].pane_display_label(pane_id, terminal),
             agent: terminal.effective_agent_label().map(str::to_string),
             title: presentation.title,
             terminal_title: terminal.terminal_title.clone(),

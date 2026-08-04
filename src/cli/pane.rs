@@ -4,7 +4,7 @@ use clap::ArgMatches;
 
 use super::projection::ParseError;
 use crate::api::schema::panes::{PaneMetadataProjection, PaneMoveProjection, PaneSwapProjection};
-use crate::api::schema::{Method, PaneDirection, PaneMoveDestination};
+use crate::api::schema::{Method, PaneDirection, PaneMoveDestination, PanePlacement};
 
 pub(crate) fn command() -> clap::Command {
     bindings::command()
@@ -149,6 +149,21 @@ fn move_pane(matches: &ArgMatches) -> Result<Method, ParseError> {
         .map(|value| finite("ratio", &value))
         .transpose()?;
     params.destination = if let Some(tab) = text("tab") {
+        if let Some(placement) = text("place") {
+            let placement = match placement.as_str() {
+                "left" => PanePlacement::Left,
+                "right" => PanePlacement::Right,
+                "above" => PanePlacement::Above,
+                "below" => PanePlacement::Below,
+                _ => return Err(ParseError::Usage(format!("invalid placement: {placement}"))),
+            };
+            PaneMoveDestination::TabPlacement {
+                tab_id: super::normalize_tab_id(&tab),
+                target_pane_id: super::normalize_pane_id(&text("target-pane").ok_or_else(|| ParseError::Usage("missing required --target-pane".into()))?),
+                placement,
+                moved_ratio: ratio,
+            }
+        } else {
         let split =
             text("split").ok_or_else(|| ParseError::Usage("missing required --split".into()))?;
         PaneMoveDestination::Tab {
@@ -156,6 +171,7 @@ fn move_pane(matches: &ArgMatches) -> Result<Method, ParseError> {
             target_pane_id: text("target-pane").map(|value| super::normalize_pane_id(&value)),
             split: bindings::parse_choice(bindings::SPLITS, "split direction", &split)?,
             ratio,
+        }
         }
     } else if matches.get_flag("new-tab") {
         PaneMoveDestination::NewTab {
@@ -235,6 +251,25 @@ mod tests {
         params.target_pane_id =
             caller_target(&matches, params.target_pane_id, caller, true, true).unwrap();
         params
+    }
+
+    #[test]
+    fn pane_projection_accepts_four_way_placement() {
+        for (name, placement) in [("left", PanePlacement::Left), ("right", PanePlacement::Right), ("above", PanePlacement::Above), ("below", PanePlacement::Below)] {
+            let parsed = request("move", &["issue-1", "--tab", "issue:2", "--target-pane", "issue-3", "--place", name, "--ratio", "0.25"]).unwrap();
+            let Method::PaneMove(params) = parsed.method else { panic!("expected pane move") };
+            assert_eq!(params.destination, PaneMoveDestination::TabPlacement {
+                tab_id: "issue:2".into(), target_pane_id: "issue-3".into(), placement, moved_ratio: Some(0.25),
+            });
+        }
+        for values in [
+            vec!["pane", "--tab", "tab", "--place", "above"],
+            vec!["pane", "--new-tab", "--target-pane", "target", "--place", "above"],
+            vec!["pane", "--tab", "tab", "--target-pane", "target", "--place", "above", "--split", "right"],
+            vec!["pane", "--tab", "tab", "--target-pane", "target", "--place", "above", "--ratio", "NaN"],
+        ] {
+            assert!(request("move", &values).is_err());
+        }
     }
 
     #[test]

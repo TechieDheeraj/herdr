@@ -81,6 +81,8 @@ herdr agent rename w1:p2 reviewer
 
 超时或 `agent_prompt_stalled` 并不意味着没有发送输入。重试前请先读取智能体，避免重复提交同一提示。ID 和智能体名称只在所属服务器内有效；在 TUI 中切换机器不会改变已有窗格中 CLI 命令的目标。
 
+`idle` 表示智能体正等待输入,且其窗格已在聚焦的 Herdr 界面中查看。`done` 是相同的底层 idle 状态,但用于后台工作完成后,直到该窗格本身获得焦点或 `pane focus` / `agent focus` 指向它。仅聚焦其所属工作区、标签页或同一标签页中的其他窗格不会把它标记为已查看。仅通过 CLI 读取也不会把它标记为已查看。`blocked` 表示 Herdr 识别到了审批或提问界面。`unknown` 表示智能体存在,但 Herdr 无法可靠判断其生命周期;它不代表工作成功完成。区别重要时,请指定精确的 `--until` 状态。
+
 `pane wait-output` 不解释智能体生命周期。它轮询选定的终端快照并立即进行第一次搜索,所以已经存在的文本也会匹配。默认来源名是 `recent`;匹配时会把最近 80 个已渲染终端行作为未折行输出处理。`--lines` 可以修改这个行数限制;`--regex` 使用 Rust 正则表达式语法并逐行匹配。
 
 在 CLI 中,`pane read` 和 `agent read` 都直接打印终端文本。默认输出去除 ANSI 转义的 UTF-8 文本;来源包含样式时,使用 `--format ansi` 或 `--ansi` 保留终端转义。`detection` 来源始终是纯文本。对 recent 类来源,`--lines N` 会在可选的取消折行之前选择最后 N 个已渲染终端行;省略时默认读取 80 行。对 `visible` 和 `detection`,省略 `--lines` 会返回完整快照,指定时保留按换行分隔的最后 N 行。socket API 在 `.result.read.text` 返回文本。

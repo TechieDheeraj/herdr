@@ -125,6 +125,19 @@ fn agent_start_and_prompt_requests_round_trip() {
         prompt
     );
 
+    let mark_unread = Request {
+        id: "mark-unread".into(),
+        method: Method::AgentMarkUnread(AgentTarget {
+            target: "reviewer".into(),
+        }),
+    };
+    let mark_unread_json = serde_json::to_value(&mark_unread).unwrap();
+    assert_eq!(mark_unread_json["method"], "agent.mark_unread");
+    assert_eq!(
+        serde_json::from_value::<Request>(mark_unread_json).unwrap(),
+        mark_unread
+    );
+
     let prompt_and_wait = Request {
         id: "prompt-and-wait".into(),
         method: Method::AgentPrompt(AgentPromptParams {
@@ -829,6 +842,7 @@ fn worktree_request_and_response_round_trip() {
                 foreground_cwd: None,
                 restore_error: None,
                 label: None,
+                display_label: Some("pane 1".into()),
                 agent: None,
                 title: None,
                 terminal_title: None,
@@ -1258,6 +1272,7 @@ fn create_response_round_trips_with_root_pane() {
                 foreground_cwd: None,
                 restore_error: None,
                 label: None,
+                display_label: Some("pane 1".into()),
                 agent: None,
                 title: None,
                 terminal_title: None,

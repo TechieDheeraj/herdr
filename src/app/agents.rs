@@ -87,6 +87,45 @@ impl App {
             })
     }
 
+    pub(super) fn mark_agent_unread_target(
+        &mut self,
+        target: &str,
+    ) -> Result<crate::api::schema::AgentInfo, TerminalTargetError> {
+        let resolved = self.resolve_agent_target(target)?;
+        let previous_status = self
+            .agent_info(resolved.ws_idx, resolved.pane_id)
+            .map(|agent| agent.agent_status)
+            .ok_or_else(|| TerminalTargetError::NotFound {
+                target: target.to_string(),
+            })?;
+
+        let changed = self
+            .state
+            .set_pane_seen(resolved.ws_idx, resolved.pane_id, false);
+        let agent = self
+            .agent_info(resolved.ws_idx, resolved.pane_id)
+            .ok_or_else(|| TerminalTargetError::NotFound {
+                target: target.to_string(),
+            })?;
+
+        if changed && previous_status != agent.agent_status {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneAgentStatusChanged,
+                data: crate::api::schema::EventData::PaneAgentStatusChanged {
+                    pane_id: agent.pane_id.clone(),
+                    workspace_id: agent.workspace_id.clone(),
+                    agent_status: agent.agent_status,
+                    agent: agent.agent.clone(),
+                    title: agent.title.clone(),
+                    display_agent: agent.display_agent.clone(),
+                    state_labels: agent.state_labels.clone(),
+                },
+            });
+        }
+
+        Ok(agent)
+    }
+
     pub(super) fn rename_agent_target(
         &mut self,
         target: &str,

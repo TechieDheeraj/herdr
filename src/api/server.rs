@@ -1145,6 +1145,7 @@ mod tests {
             foreground_cwd: None,
             restore_error: None,
             label: None,
+            display_label: Some("pane 1".into()),
             agent: Some("pi".into()),
             title: None,
             terminal_title: None,

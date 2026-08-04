@@ -92,11 +92,11 @@ operations::define_operations! {
     AgentWait(AgentWaitParams) => "agent.wait", false, false;
     PaneSplit(PaneSplitParams) => "pane.split", true, true;
     PaneSwap(PaneSwapParams) => "pane.swap", true, true;
-    PaneMove(PaneMoveParams) => "pane.move", true, false;
+    PaneMove(PaneMoveParams) => "pane.move", true, true;
     PaneZoom(PaneZoomParams) => "pane.zoom", true, true;
     PaneLayout(PaneLayoutParams) => "pane.layout", false, false;
     PaneProcessInfo(PaneProcessInfoParams) => "pane.process_info", false, false;
-    LayoutExport(LayoutExportParams) => "layout.export", false, false;
+    LayoutExport(LayoutExportParams) => "layout.export", false, true;
     LayoutApply(LayoutApplyParams) => "layout.apply", true, false;
     LayoutSetSplitRatio(LayoutSetSplitRatioParams) => "layout.set_split_ratio", true, true;
     PaneNeighbor(PaneNeighborParams) => "pane.neighbor", false, false;
@@ -145,6 +145,7 @@ operations::define_operations! {
     PluginPaneOpen(PluginPaneOpenParams) => "plugin.pane.open", true, false;
     PluginPaneFocus(PluginPaneFocusParams) => "plugin.pane.focus", true, false;
     PluginPaneClose(PluginPaneCloseParams) => "plugin.pane.close", true, false;
+    AgentMarkUnread(AgentTarget) => "agent.mark_unread", true, true;
 }
 
 #[cfg(test)]

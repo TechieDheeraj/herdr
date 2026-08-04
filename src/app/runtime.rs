@@ -171,6 +171,7 @@ impl App {
             self.pending_host_appearance_deadline,
             self.session_save_deadline,
             self.next_tab_bar_status_deadline(),
+            self.pane_drag_deadline(),
             render_deadline,
         ]
         .into_iter()

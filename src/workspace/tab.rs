@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -6,7 +6,7 @@ use ratatui::layout::Direction;
 use tokio::sync::{mpsc, Notify};
 
 use crate::events::AppEvent;
-use crate::layout::{Node, PaneId, TileLayout};
+use crate::layout::{Node, PaneId, PanePlacement, TileLayout};
 use crate::pane::{PaneLaunchEnv, PaneState};
 use crate::render_signal::RenderSignal;
 use crate::terminal::{TerminalId, TerminalRuntime, TerminalRuntimeRegistry, TerminalState};
@@ -38,6 +38,9 @@ enum SplitCommand<'a> {
 pub struct Tab {
     pub custom_name: Option<String>,
     pub number: usize,
+    /// One past the highest number allocated for this tab's generated
+    /// `pane N` labels. Gaps below this high-water mark may be reused.
+    pub next_auto_pane_number: usize,
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
     pub layout: TileLayout,
@@ -182,6 +185,7 @@ impl Tab {
             Self {
                 custom_name: None,
                 number,
+                next_auto_pane_number: 2,
                 root_pane: root_id,
                 layout,
                 panes,
@@ -408,7 +412,11 @@ impl Tab {
         if focus_new_pane {
             self.layout.focus_pane(new_id);
         }
-        self.panes.insert(new_id, PaneState::new(terminal_id));
+        let auto_name_number = self.allocate_auto_pane_number();
+        self.panes.insert(
+            new_id,
+            PaneState::new(terminal_id).with_auto_name_number(auto_name_number),
+        );
         self.zoomed = false;
         Ok(NewPane {
             pane_id: new_id,
@@ -441,10 +449,13 @@ impl Tab {
     ) -> Self {
         let mut panes = HashMap::new();
         let pane_id = moved.pane_id;
-        panes.insert(pane_id, moved.pane_state);
+        let mut pane_state = moved.pane_state;
+        pane_state.auto_name_number = 1;
+        panes.insert(pane_id, pane_state);
         Self {
             custom_name,
             number,
+            next_auto_pane_number: 2,
             root_pane: pane_id,
             layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),
             panes,
@@ -493,7 +504,32 @@ impl Tab {
             return Err(moved);
         }
         let pane_id = moved.pane_id;
-        self.panes.insert(pane_id, moved.pane_state);
+        let auto_name_number = self.allocate_auto_pane_number();
+        let mut pane_state = moved.pane_state;
+        pane_state.auto_name_number = auto_name_number;
+        self.panes.insert(pane_id, pane_state);
+        self.zoomed = false;
+        Ok(pane_id)
+    }
+
+    pub(crate) fn insert_existing_pane_at(
+        &mut self,
+        target_pane_id: PaneId,
+        moved: MovedPane,
+        placement: PanePlacement,
+        moved_ratio: f32,
+    ) -> Result<PaneId, MovedPane> {
+        if !self
+            .layout
+            .insert_pane_at(target_pane_id, moved.pane_id, placement, moved_ratio)
+        {
+            return Err(moved);
+        }
+        let pane_id = moved.pane_id;
+        let auto_name_number = self.allocate_auto_pane_number();
+        let mut pane_state = moved.pane_state;
+        pane_state.auto_name_number = auto_name_number;
+        self.panes.insert(pane_id, pane_state);
         self.zoomed = false;
         Ok(pane_id)
     }
