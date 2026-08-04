@@ -6776,6 +6776,26 @@
           ],
           "type": "string"
         },
+        "BatteryHealth": {
+          "properties": {
+            "charging": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "percentage": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "percentage"
+          ],
+          "type": "object"
+        },
         "ClientWindowTitleReason": {
           "enum": [
             "set",
@@ -7484,6 +7504,50 @@
             "layout_updated"
           ],
           "type": "string"
+        },
+        "HealthSnapshot": {
+          "properties": {
+            "battery": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/BatteryHealth"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "cpu_usage_percentage": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "disk": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/ResourceUsage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "ram": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/ResourceUsage"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
         },
         "InstalledPluginInfo": {
           "properties": {
@@ -9165,6 +9229,25 @@
           ],
           "type": "string"
         },
+        "ResourceUsage": {
+          "properties": {
+            "total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "used_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "used_bytes",
+            "total_bytes"
+          ],
+          "type": "object"
+        },
         "ResponseResult": {
           "oneOf": [
             {
@@ -10482,6 +10565,10 @@
                 "string",
                 "null"
               ]
+            },
+            "health": {
+              "$ref": "#/schemas/success_response/$defs/HealthSnapshot",
+              "default": {}
             },
             "layouts": {
               "items": {

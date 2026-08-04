@@ -163,6 +163,7 @@ impl App {
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
             self.restored_worktree_validation_retry_at,
+            self.next_health_sample,
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,
@@ -236,6 +237,33 @@ mod tests {
         let interrupted = std::io::Error::new(std::io::ErrorKind::Interrupted, "test interrupt");
 
         assert!(retain_detached_process_after_wait(42, Err(interrupted)));
+    }
+
+    #[test]
+    fn sampled_health_updates_pure_state_and_reschedules_collection() {
+        let mut app = super::super::App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            tokio::sync::mpsc::unbounded_channel().1,
+            crate::api::EventHub::default(),
+        );
+        app.health_sample_in_flight = true;
+        let snapshot = crate::health::HealthSnapshot {
+            cpu_usage_percentage: Some(37),
+            ram: crate::health::ResourceUsage::new(3, 8),
+            ..crate::health::HealthSnapshot::default()
+        };
+
+        assert!(app.handle_internal_event_with_render_impact(
+            crate::events::AppEvent::HealthMetricsSampled { snapshot }
+        ));
+        assert_eq!(app.state.health, snapshot);
+        assert!(!app.health_sample_in_flight);
+        assert!(app.next_health_sample.is_some());
+        assert!(!app.handle_internal_event_with_render_impact(
+            crate::events::AppEvent::HealthMetricsSampled { snapshot }
+        ));
     }
 
     fn test_app_with_pane() -> (super::super::App, crate::layout::PaneId) {

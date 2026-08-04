@@ -554,6 +554,7 @@ mod tests {
             selected: 0,
             sidebar_width: None,
             sidebar_section_split: None,
+            sidebar_health_section_split: None,
             collapsed_space_keys: Default::default(),
         }
     }

@@ -1664,6 +1664,7 @@ impl AppState {
                 }
                 Vec::new()
             }
+            AppEvent::HealthMetricsSampled { .. } => Vec::new(),
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::WorktreeReadFinished(_) => Vec::new(),

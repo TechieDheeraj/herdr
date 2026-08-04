@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 pub(crate) const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const GIT_REPO_DISCOVERY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const HEALTH_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(5);
@@ -126,6 +127,9 @@ pub struct App {
         Vec<(String, crate::workspace::WorktreeSpaceMembership)>,
     pub(crate) restored_worktree_validation_retry_at: Option<Instant>,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
+    pub(crate) health_sampler: Arc<std::sync::Mutex<crate::health::HealthSampler>>,
+    pub(crate) next_health_sample: Option<Instant>,
+    pub(crate) health_sample_in_flight: bool,
     pub(crate) pending_api_worktree_creates: HashMap<std::path::PathBuf, u64>,
     pub(crate) worktree_read_slots: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pending_api_worktree_removes: HashMap<String, u64>,
@@ -546,6 +550,7 @@ impl App {
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
+            health: crate::health::HealthSnapshot::default(),
             next_agent_state_change_seq: 0,
             confirm_close: config.ui.confirm_close,
             pane_borders: config.ui.pane_borders,
@@ -648,6 +653,11 @@ impl App {
             pending_restored_worktree_spaces: Vec::new(),
             restored_worktree_validation_retry_at: None,
             git_status_cache: HashMap::new(),
+            health_sampler: Arc::new(std::sync::Mutex::new(
+                crate::health::HealthSampler::default(),
+            )),
+            next_health_sample: initial_health_sample_deadline(),
+            health_sample_in_flight: false,
             pending_api_worktree_creates: HashMap::new(),
             worktree_read_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             pending_api_worktree_removes: HashMap::new(),

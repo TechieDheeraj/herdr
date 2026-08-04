@@ -1566,6 +1566,7 @@ mod tests {
             selected: 0,
             sidebar_width: None,
             sidebar_section_split: None,
+            sidebar_health_section_split: None,
             collapsed_space_keys: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1661,6 +1662,7 @@ mod tests {
             selected: 0,
             sidebar_width: None,
             sidebar_section_split: None,
+            sidebar_health_section_split: None,
             collapsed_space_keys: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1770,6 +1772,7 @@ mod tests {
             selected: 0,
             sidebar_width: None,
             sidebar_section_split: None,
+            sidebar_health_section_split: None,
             collapsed_space_keys: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1882,6 +1885,7 @@ mod tests {
             selected: 0,
             sidebar_width: None,
             sidebar_section_split: None,
+            sidebar_health_section_split: None,
             collapsed_space_keys: Default::default(),
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -2222,6 +2226,7 @@ mod tests {
             selected: 0,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
+            sidebar_health_section_split: None,
             collapsed_space_keys: Default::default(),
         };
         history.layout_fingerprint = super::super::snapshot::layout_fingerprint(&snapshot);

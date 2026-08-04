@@ -72,6 +72,7 @@ impl App {
             panes,
             layouts,
             agents: self.collect_agent_infos(),
+            health: self.state.health,
         }
     }
 }
@@ -115,6 +116,7 @@ mod tests {
         assert_eq!(snapshot.tabs.len(), 2);
         assert_eq!(snapshot.panes.len(), 2);
         assert_eq!(snapshot.layouts.len(), 2);
+        assert_eq!(snapshot.health, app.state.health);
         assert_eq!(
             snapshot.focused_workspace_id.as_deref(),
             Some(snapshot.workspaces[0].workspace_id.as_str())

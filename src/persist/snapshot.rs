@@ -25,6 +25,8 @@ pub struct SessionSnapshot {
     #[serde(default)]
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
+    pub sidebar_health_section_split: Option<f32>,
+    #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
 }
 
@@ -194,6 +196,8 @@ struct RawSessionSnapshot {
     #[serde(default)]
     sidebar_section_split: Option<f32>,
     #[serde(default)]
+    sidebar_health_section_split: Option<f32>,
+    #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
 }
 
@@ -209,6 +213,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         selected: raw.selected,
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
+        sidebar_health_section_split: raw.sidebar_health_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
     })
 }
@@ -662,6 +667,7 @@ mod tests {
             selected: 0,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
+            sidebar_health_section_split: Some(0.75),
             collapsed_space_keys: std::collections::HashSet::new(),
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -670,6 +676,7 @@ mod tests {
         assert_eq!(restored.active, None);
         assert_eq!(restored.sidebar_width, Some(26));
         assert_eq!(restored.sidebar_section_split, Some(0.5));
+        assert_eq!(restored.sidebar_health_section_split, Some(0.75));
     }
 
     #[test]
@@ -751,6 +758,7 @@ mod tests {
             selected: 0,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
+            sidebar_health_section_split: None,
             collapsed_space_keys: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
         };
@@ -1452,6 +1460,7 @@ mod tests {
             selected: 0,
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
+            sidebar_health_section_split: None,
             collapsed_space_keys: std::collections::HashSet::new(),
         };
 

@@ -202,6 +202,10 @@ pub enum AppEvent {
         segment_index: usize,
         result: Result<Option<String>, String>,
     },
+    /// Background server-host resource sampling completed.
+    HealthMetricsSampled {
+        snapshot: crate::health::HealthSnapshot,
+    },
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,

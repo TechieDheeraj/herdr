@@ -65,8 +65,68 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
     )
 }
 
-pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
+fn expanded_sidebar_primary_rect(area: Rect, health_split_ratio: Option<f32>) -> Rect {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    if content.width == 0 || content.height == 0 {
+        return Rect::default();
+    }
+    if content.height < MIN_SIDEBAR_HEIGHT_WITH_HEALTH {
+        return content;
+    }
+
+    let default_primary_height = content
+        .height
+        .saturating_sub(PREFERRED_HEALTH_CHECK_SECTION_ROWS);
+    let requested_primary_height = health_split_ratio
+        .map(|ratio| ((content.height as f32) * ratio.clamp(0.0, 1.0)).round() as u16)
+        .unwrap_or(default_primary_height);
+    let primary_height = requested_primary_height.clamp(
+        MIN_PRIMARY_SIDEBAR_ROWS,
+        content.height.saturating_sub(MIN_HEALTH_CHECK_SECTION_ROWS),
+    );
+    Rect::new(content.x, content.y, content.width, primary_height)
+}
+
+pub(crate) fn health_check_rect(area: Rect, health_split_ratio: Option<f32>) -> Rect {
+    let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
+    let primary = expanded_sidebar_primary_rect(area, health_split_ratio);
+    if primary == content {
+        return Rect::default();
+    }
+    Rect::new(
+        content.x,
+        primary.y + primary.height,
+        content.width,
+        content.height.saturating_sub(primary.height),
+    )
+}
+
+pub(crate) fn health_check_divider_rect(area: Rect, health_split_ratio: Option<f32>) -> Rect {
+    let health = health_check_rect(area, health_split_ratio);
+    if health == Rect::default() {
+        return Rect::default();
+    }
+    Rect::new(health.x, health.y, health.width, 1)
+}
+
+pub(crate) fn health_split_ratio_for_row(area: Rect, row: u16) -> Option<f32> {
+    if area.height < MIN_SIDEBAR_HEIGHT_WITH_HEALTH {
+        return None;
+    }
+    let relative_y = row.saturating_sub(area.y);
+    let primary_height = relative_y.clamp(
+        MIN_PRIMARY_SIDEBAR_ROWS,
+        area.height.saturating_sub(MIN_HEALTH_CHECK_SECTION_ROWS),
+    );
+    Some((primary_height as f32) / (area.height as f32))
+}
+
+pub(crate) fn sidebar_section_divider_rect(
+    area: Rect,
+    split_ratio: f32,
+    health_split_ratio: Option<f32>,
+) -> Rect {
+    let content = expanded_sidebar_primary_rect(area, health_split_ratio);
     if content.width == 0 || content.height < 6 {
         return Rect::default();
     }
