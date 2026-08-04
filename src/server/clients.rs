@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use crate::protocol::{
     ClientKeyCode, ClientKeyKind, ClientMouseButton, ClientMouseKind, ClientPaneInputEvent,
@@ -7,6 +8,15 @@ use crate::protocol::{
 };
 use crate::server::client_transport::ClientWriter;
 use crate::server::render_stream::ClientRenderState;
+
+const MAX_NOTIFICATION_ACTIVATIONS: usize = 64;
+const NOTIFICATION_ACTIVATION_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+struct PendingNotificationActivation {
+    id: u64,
+    pane_id: crate::layout::PaneId,
+    created_at: Instant,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClientConnectionMode {

@@ -330,7 +330,7 @@ tab_bar_right_separator = " · "
 命令条目会立即运行，之后按 `interval_seconds` 刷新，不会阻塞渲染，也不会与上一次运行重叠。间隔范围为 1–31,536,000 秒，超时范围为 1–3,600 秒。Herdr 使用成功输出的最后一行，并移除以 ESC 开头的终端控制序列，而不将其解释为样式；执行失败、输出为空或超过 `timeout_seconds` 后会清除该值。命令会获得与自定义命令按键绑定相同的活动工作区、标签页、窗格、socket、二进制文件和工作目录上下文。Linux、macOS 和 Windows 均支持命令条目；Linux 和 macOS 使用 `/bin/sh -lc`，Windows 使用 `cmd.exe /d /c`。
 
 分隔符只会出现在可见条目之间。设置 `tab_bar_right_separator = ""` 可直接连接条目。标签栏较窄时，整个状态区会让位给标签页及其控件。
-拖动侧边栏右侧分隔线可显示较长的 Agent 和 Space 详细信息。默认调整范围现在为 18～80 列，仍可通过 `sidebar_min_width` 和 `sidebar_max_width` 配置。右键单击完整的 Agent 或 Space 行或顶部标签页并选择 **Color**，即可从十二种预设颜色中选择，或输入严格的 `#RGB`/`#RRGGBB` 值。Herdr 会自动为彩色项目的所有文本使用清晰可读的黑色或白色；选择 **clear color** 可恢复所有默认主题样式。这些显示颜色会在对应 Herdr 服务器运行期间保留，并在服务器彻底重启后清除。在 Agent 行上选择 **Unread** 可将 idle 智能体恢复为 `done`；该标记会一直保留，直到对应窗格本身获得焦点。
+拖动侧边栏右侧分隔线可显示较长的 Agent 和 Space 详细信息。默认调整范围现在为 18～80 列，仍可通过 `sidebar_min_width` 和 `sidebar_max_width` 配置。右键单击完整的 Space 行或顶部标签页并选择 **Color**，即可从十二种预设颜色中选择，或输入严格的 `#RGB`/`#RRGGBB` 值。Herdr 会自动为彩色项目的所有文本使用清晰可读的黑色或白色；选择 **clear color** 可恢复所有默认主题样式。这些显示颜色会在对应 Herdr 服务器运行期间保留，并在服务器彻底重启后清除。在 Agent 行上选择 **Unread** 可将 idle 智能体恢复为 `done`；该标记会一直保留，直到对应窗格本身获得焦点。
 
 展开的桌面侧边栏还包含一个紧凑的 **Health Check** 区域，显示运行 Herdr 服务器的主机 CPU 使用率、可用时的电池百分比、RAM 已用量/总量和磁盘已用量/总量。上下拖动 Health Check 上方的分隔线即可调整区域大小，所选位置会随会话保存。因此，远程连接显示的是远程主机数据。在没有可读电池的台式机、容器或其他系统上，电池会显示为 `n/a`。
 
@@ -500,7 +500,7 @@ position = "bottom-right"
 
 选择 `herdr` 可使用应用内 toast，选择 `terminal` 可使用适合 SSH 场景的外层终端通知，选择 `system` 可使用本地操作系统通知服务，选择 `off` 可禁用弹出通知。Herdr 会抑制活动标签页的弹出通知。在[配置参考](/docs/config-reference/)中搜索 `ui.toast`，可查看位置、延迟行为和剪贴板反馈设置。
 
-在 macOS 上，`system` 会先尝试 `terminal-notifier`；如果它不可用或执行失败，则回退到 `/usr/bin/osascript`。该回退方式会在通知中心显示为 Script Editor，并且无法激活承载 Herdr 的终端。可运行 `brew install terminal-notifier` 安装 `terminal-notifier`。如果 Herdr 检测到受支持的终端，点击通知时它可以激活该终端应用。也可以选择 `terminal`，让受支持的外层终端负责发送通知。
+在 macOS 的常规会话／客户端模式下，如需可操作的完成通知，请运行 `brew install terminal-notifier` 安装 `terminal-notifier`。点击通知后，Herdr 会通过接收该通知的本地客户端聚焦到准确的工作区、标签页和窗格，渲染该窗格后再激活检测到的终端；使用 `herdr --remote` 时也会沿用同一路径。如果 `terminal-notifier` 或终端激活不可用，面向窗格的完成通知会在支持的情况下安全回退到外层终端通知。该回退不会打开 Script Editor，也不会将窗格标记为已读。非窗格目标的常规系统通知仍可能使用 AppleScript 回退，而 `--no-session` 通知不支持窗格操作。
 
 Windows 的 `system` 通知会保留在通知中心。点击通知会在运行中的 Herdr 客户端选择来源窗格,并在 Windows 能识别对应窗口时将终端置于前台。点击不能重新打开已关闭的客户端,也不能选择已重启服务器中的窗格。Windows Terminal 可以将所属窗口置于前台,但无法可靠地切换到另一个外层终端标签页。
 

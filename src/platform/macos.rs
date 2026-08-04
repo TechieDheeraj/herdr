@@ -1,11 +1,15 @@
 use std::ffi::OsStr;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::NonNull;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 pub(super) const REMOTE_BRIDGE_CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
 
@@ -189,6 +193,8 @@ extern "C" {
 
 const PROC_PGRP_ONLY: u32 = 2;
 const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 8192;
+const NOTIFICATION_ACTIVATION_READ_LIMIT: u64 = 32;
+static NOTIFICATION_ENDPOINT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     false
@@ -879,11 +885,140 @@ fn unique_timestamp_nanos() -> u128 {
         .unwrap_or(0)
 }
 
+/// Private callback endpoint used by the local thin client for actionable
+/// desktop notifications. The endpoint never crosses an SSH boundary: its
+/// callback is translated into a message on the client's existing connection.
+pub(crate) struct NotificationActivationEndpoint {
+    socket_path: PathBuf,
+    directory: PathBuf,
+    stop: Arc<AtomicBool>,
+    listener_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl NotificationActivationEndpoint {
+    pub(crate) fn start(on_activation: impl Fn(u64) + Send + 'static) -> std::io::Result<Self> {
+        let directory = create_notification_endpoint_directory()?;
+        let socket_path = directory.join("activate.sock");
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(err) => {
+                let _ = std::fs::remove_dir(&directory);
+                return Err(err);
+            }
+        };
+        if let Err(err) =
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+        {
+            let _ = std::fs::remove_file(&socket_path);
+            let _ = std::fs::remove_dir(&directory);
+            return Err(err);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener_stop = Arc::clone(&stop);
+        let listener_thread = match std::thread::Builder::new()
+            .name("herdr-notification-activation".to_owned())
+            .spawn(move || loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if listener_stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        if let Some(activation_id) = read_notification_activation(stream) {
+                            on_activation(activation_id);
+                        }
+                    }
+                    Err(_) if listener_stop.load(Ordering::Acquire) => break,
+                    Err(_) => std::thread::sleep(Duration::from_millis(25)),
+                }
+            }) {
+            Ok(thread) => thread,
+            Err(err) => {
+                let _ = std::fs::remove_file(&socket_path);
+                let _ = std::fs::remove_dir(&directory);
+                return Err(err);
+            }
+        };
+
+        Ok(Self {
+            socket_path,
+            directory,
+            stop,
+            listener_thread: Some(listener_thread),
+        })
+    }
+
+    pub(crate) fn callback_command(&self, activation_id: u64) -> String {
+        notification_callback_command(&self.socket_path, activation_id)
+    }
+}
+
+impl Drop for NotificationActivationEndpoint {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = UnixStream::connect(&self.socket_path);
+        if let Some(thread) = self.listener_thread.take() {
+            let _ = thread.join();
+        }
+        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_dir(&self.directory);
+    }
+}
+
+fn create_notification_endpoint_directory() -> std::io::Result<PathBuf> {
+    for _ in 0..8 {
+        let counter = NOTIFICATION_ENDPOINT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = PathBuf::from("/tmp").join(format!(
+            "herdr-notify-{}-{counter:x}-{:x}",
+            std::process::id(),
+            unique_timestamp_nanos()
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate notification activation endpoint",
+    ))
+}
+
+fn read_notification_activation(stream: UnixStream) -> Option<u64> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut line = String::new();
+    let mut reader = BufReader::new(stream).take(NOTIFICATION_ACTIVATION_READ_LIMIT);
+    let read = reader.read_line(&mut line).ok()?;
+    if read == 0 || !line.ends_with('\n') {
+        return None;
+    }
+    let value = line.trim_end_matches(['\r', '\n']);
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse::<u64>().ok().filter(|value| *value != 0)
+}
+
+fn notification_callback_command(socket_path: &Path, activation_id: u64) -> String {
+    format!(
+        "/usr/bin/printf '%s\\n' {} | /usr/bin/nc -w 1 -U {}",
+        shell_single_quote(&activation_id.to_string()),
+        shell_single_quote(&socket_path.to_string_lossy())
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// Show a native macOS notification.
 ///
 /// Prefer `terminal-notifier` when it is installed because it can activate the
-/// hosting terminal on click. Fall back to built-in AppleScript notifications
-/// when it is not available.
+/// hosting terminal on click. Generic notifications retain the AppleScript
+/// fallback; pane-targeted notifications use the separate actionable path
+/// below so clicking a completion can never open Script Editor.
 pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
     show_desktop_notification_with_command(title, body, |program| Command::new(program))
 }
@@ -900,6 +1035,49 @@ fn show_desktop_notification_with_command(
     show_osascript_notification(title, body, &mut command)
 }
 
+pub(crate) fn show_actionable_desktop_notification(
+    title: &str,
+    body: Option<&str>,
+    callback_command: &str,
+) -> std::io::Result<bool> {
+    let mut command = |program: &str| Command::new(program);
+    if verified_terminal_bundle_identifier(&mut command).is_none() {
+        return Ok(false);
+    }
+    show_terminal_notifier_notification_with_options(
+        title,
+        body,
+        None,
+        Some(callback_command),
+        &mut command,
+    )
+}
+
+/// Bring the verified host terminal application forward after the server has
+/// focused the notification's pane.
+pub(crate) fn activate_host_terminal() -> std::io::Result<bool> {
+    let mut command = |program: &str| Command::new(program);
+    activate_host_terminal_with_command(&mut command)
+}
+
+fn activate_host_terminal_with_command(
+    command: &mut impl FnMut(&str) -> Command,
+) -> std::io::Result<bool> {
+    let Some(bundle_id) = verified_terminal_bundle_identifier(command) else {
+        return Ok(false);
+    };
+    activate_terminal_bundle_with_command(&bundle_id, command)
+}
+
+fn activate_terminal_bundle_with_command(
+    bundle_id: &str,
+    command: &mut impl FnMut(&str) -> Command,
+) -> std::io::Result<bool> {
+    let mut cmd = command("/usr/bin/open");
+    cmd.arg("-b").arg(bundle_id);
+    run_notification_command(cmd)
+}
+
 fn show_terminal_notifier_notification(
     title: &str,
     body: Option<&str>,
@@ -910,6 +1088,7 @@ fn show_terminal_notifier_notification(
         title,
         body,
         activate_bundle_id.as_deref(),
+        None,
         command,
     )
 }
@@ -918,10 +1097,11 @@ fn show_terminal_notifier_notification_with_options(
     title: &str,
     body: Option<&str>,
     activate_bundle_id: Option<&str>,
+    callback_command: Option<&str>,
     command: &mut impl FnMut(&str) -> Command,
 ) -> std::io::Result<bool> {
     let mut cmd = command("terminal-notifier");
-    build_terminal_notifier_command(&mut cmd, title, body, activate_bundle_id);
+    build_terminal_notifier_command(&mut cmd, title, body, activate_bundle_id, callback_command);
     run_notification_command(cmd)
 }
 
@@ -930,11 +1110,15 @@ fn build_terminal_notifier_command(
     title: &str,
     body: Option<&str>,
     activate_bundle_id: Option<&str>,
+    callback_command: Option<&str>,
 ) {
     cmd.arg("-title").arg(title);
     cmd.arg("-message").arg(body.unwrap_or_default());
     if let Some(bundle_id) = activate_bundle_id {
         cmd.arg("-activate").arg(bundle_id);
+    }
+    if let Some(callback_command) = callback_command {
+        cmd.arg("-execute").arg(callback_command);
     }
 }
 
@@ -1498,13 +1682,14 @@ mod tests {
     }
 
     #[test]
-    fn terminal_notifier_command_includes_icon_and_activation() {
+    fn actionable_terminal_notifier_executes_without_early_activation() {
         let mut cmd = Command::new("terminal-notifier");
         build_terminal_notifier_command(
             &mut cmd,
             "pi finished",
             Some("workspace 1"),
-            Some("com.mitchellh.ghostty"),
+            None,
+            Some("notify callback"),
         );
         let args = cmd
             .get_args()
@@ -1517,9 +1702,25 @@ mod tests {
                 "pi finished",
                 "-message",
                 "workspace 1",
-                "-activate",
-                "com.mitchellh.ghostty"
+                "-execute",
+                "notify callback"
             ]
+        );
+    }
+
+    #[test]
+    fn host_terminal_activation_uses_bundle_id() {
+        let mut command = |program: &str| {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg("test \"$0\" = /usr/bin/open && test \"$1\" = -b && test \"$2\" = com.mitchellh.ghostty")
+                .arg(program);
+            cmd
+        };
+
+        assert!(
+            activate_terminal_bundle_with_command("com.mitchellh.ghostty", &mut command)
+                .expect("host terminal activation command")
         );
     }
 
@@ -1543,6 +1744,7 @@ mod tests {
             "title",
             Some("body"),
             Some("com.mitchellh.ghostty"),
+            None,
             &mut command,
         )
         .expect("terminal-notifier command should run");
@@ -1556,7 +1758,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_notification_falls_back_to_osascript_when_terminal_notifier_fails() {
+    fn generic_desktop_notification_falls_back_to_osascript() {
         let path =
             std::env::temp_dir().join(format!("herdr-osascript-args-{}", std::process::id()));
         let script = r#"
@@ -1577,12 +1779,77 @@ printf '%s\n' "$@" > "$HERDR_NOTIFY_ARGS"
             .expect("osascript fallback should run");
 
         assert!(shown);
-        let args = std::fs::read_to_string(&path).expect("args file");
+        let args = std::fs::read_to_string(&path).expect("osascript args");
         let _ = std::fs::remove_file(&path);
         assert_eq!(
             args,
             "-e\non run argv\n-e\ndisplay notification (item 2 of argv) with title (item 1 of argv)\n-e\nend run\ntitle\nbody\n"
         );
+    }
+
+    #[test]
+    fn notification_callback_command_shell_quotes_socket_path() {
+        let command = notification_callback_command(Path::new("/tmp/herdr's socket"), 42);
+        assert_eq!(
+            command,
+            "/usr/bin/printf '%s\\n' '42' | /usr/bin/nc -w 1 -U '/tmp/herdr'\\''s socket'"
+        );
+    }
+
+    #[test]
+    fn notification_activation_endpoint_accepts_one_numeric_id() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let endpoint = NotificationActivationEndpoint::start(move |activation_id| {
+            let _ = tx.send(activation_id);
+        })
+        .expect("activation endpoint");
+        let directory = endpoint.directory.clone();
+        let socket_path = endpoint.socket_path.clone();
+        assert_eq!(
+            std::fs::metadata(&directory)
+                .expect("endpoint directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&socket_path)
+                .expect("endpoint socket metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let mut stream =
+            UnixStream::connect(&endpoint.socket_path).expect("connect activation endpoint");
+        stream.write_all(b"73\n").expect("write activation id");
+        drop(stream);
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1))
+                .expect("activation callback"),
+            73
+        );
+        drop(endpoint);
+        assert!(!socket_path.exists());
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn notification_activation_reader_rejects_malformed_values() {
+        fn read_value(value: &[u8]) -> Option<u64> {
+            let (mut writer, reader) = UnixStream::pair().expect("socket pair");
+            writer.write_all(value).expect("write test value");
+            drop(writer);
+            read_notification_activation(reader)
+        }
+
+        assert_eq!(read_value(b"91\n"), Some(91));
+        assert_eq!(read_value(b"0\n"), None);
+        assert_eq!(read_value(b" 91\n"), None);
+        assert_eq!(read_value(b"91"), None);
+        assert_eq!(read_value(b"not-a-token\n"), None);
     }
 
     #[test]

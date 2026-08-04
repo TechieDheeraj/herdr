@@ -1416,6 +1416,8 @@ pub enum ServerMessage {
         message: String,
         /// Optional human-readable notification body.
         body: Option<String>,
+        /// Opaque one-time activation capability for a pane-targeted notification.
+        activation_id: Option<u64>,
     },
 
     /// OSC 52 clipboard data forwarded from a PTY through the server.
@@ -2903,16 +2905,36 @@ mod tests {
             NotifyKind::Toast,
             NotifyKind::SystemToast,
         ] {
+            let activation_id = (kind == NotifyKind::SystemToast).then_some(42);
             let msg = ServerMessage::Notify {
                 kind,
                 message: "agent done".to_owned(),
                 body: None,
+                activation_id,
             };
             let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
             let (decoded, _): (ServerMessage, _) =
                 bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
             assert_eq!(msg, decoded);
         }
+    }
+
+    #[test]
+    fn notification_activation_roundtrip() {
+        let msg = ClientMessage::NotificationActivated { activation_id: 42 };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ClientMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
+
+        let msg = ServerMessage::NotificationActivationResolved {
+            activation_id: 42,
+            focused: true,
+        };
+        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
+        let (decoded, _): (ServerMessage, _) =
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
+        assert_eq!(msg, decoded);
     }
 
     #[test]

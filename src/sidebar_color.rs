@@ -1,5 +1,3 @@
-use crate::terminal::TerminalId;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SidebarRowColor {
     pub(crate) r: u8,
@@ -55,7 +53,6 @@ impl SidebarRowColor {
 pub(crate) enum SidebarColorTarget {
     Workspace { workspace_id: String },
     Tab { tab_id: String },
-    Agent { terminal_id: TerminalId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

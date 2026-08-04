@@ -55,6 +55,34 @@ pub fn show_notification(title: &str, body: Option<&str>) -> io::Result<bool> {
     Ok(true)
 }
 
+pub fn show_system_notification(title: &str, body: Option<&str>) -> io::Result<bool> {
+    show_system_notification_with(
+        title,
+        body,
+        crate::platform::show_desktop_notification,
+        show_notification,
+    )
+}
+
+fn show_system_notification_with(
+    title: &str,
+    body: Option<&str>,
+    mut show_system: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
+    mut show_terminal: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
+) -> io::Result<bool> {
+    match show_system(title, body) {
+        Ok(true) => Ok(true),
+        Ok(false) => show_terminal(title, body),
+        Err(system_err) => match show_terminal(title, body) {
+            Ok(true) => Ok(true),
+            Ok(false) => Err(system_err),
+            Err(fallback_err) => Err(io::Error::other(format!(
+                "system notification failed: {system_err}; terminal fallback failed: {fallback_err}"
+            ))),
+        },
+    }
+}
+
 pub fn split_message(message: &str) -> (&str, Option<&str>) {
     match message.split_once(": ") {
         Some((title, body)) if !title.is_empty() && !body.is_empty() => (title, Some(body)),
@@ -139,5 +167,26 @@ mod tests {
     fn tmux_passthrough_wraps_and_escapes() {
         let wrapped = wrap_tmux_passthrough(b"\x1b]9;hi\x1b\\");
         assert_eq!(wrapped, b"\x1bPtmux;\x1b\x1b]9;hi\x1b\x1b\\\x1b\\");
+    }
+
+    #[test]
+    fn system_notification_uses_terminal_fallback_when_unavailable() {
+        let mut fallback = None;
+        let shown = show_system_notification_with(
+            "done",
+            Some("workspace"),
+            |_, _| Ok(false),
+            |title, body| {
+                fallback = Some((title.to_owned(), body.map(str::to_owned)));
+                Ok(true)
+            },
+        )
+        .expect("terminal fallback");
+
+        assert!(shown);
+        assert_eq!(
+            fallback,
+            Some(("done".to_owned(), Some("workspace".to_owned())))
+        );
     }
 }

@@ -238,6 +238,8 @@ pub struct HeadlessServer {
     next_activity_stamp: u64,
     /// Configured virtual terminal size used when no clients are connected.
     headless_size: (u16, u16),
+    /// Process-local capability sequence for actionable notifications.
+    next_notification_activation_id: u64,
     /// Shared pane runtime size derived from the foreground client, or the
     /// configured headless size when no clients are connected.
     effective_size: (u16, u16),
@@ -384,6 +386,7 @@ impl HeadlessServer {
             deferred_alt_screen_reads: Vec::new(),
             next_activity_stamp: 1,
             headless_size,
+            next_notification_activation_id: notification_activation_seed(),
             effective_size: headless_size,
             shutting_down: false,
             host_shutdown_requested: Arc::new(AtomicBool::new(false)),
@@ -1671,15 +1674,16 @@ impl HeadlessServer {
         };
 
         if let Some(client) = self.clients.get(&client_id) {
-            if let Some(writer) = &client.writer {
-                if writer.control.send(serialized).is_err() {
-                    debug!(
-                        client_id,
-                        "client writer channel closed during targeted send"
-                    );
-                    self.remove_client_and_resize_if_needed(client_id);
-                    return false;
-                }
+            let Some(writer) = &client.writer else {
+                return false;
+            };
+            if writer.control.send(serialized).is_err() {
+                debug!(
+                    client_id,
+                    "client writer channel closed during targeted send"
+                );
+                self.remove_client_and_resize_if_needed(client_id);
+                return false;
             }
             true
         } else {
@@ -2066,6 +2070,10 @@ impl HeadlessServer {
                 target,
                 takeover,
             } => self.control_terminal_client(client_id, target, takeover),
+            ServerEvent::ClientNotificationActivated {
+                client_id,
+                activation_id,
+            } => self.handle_client_notification_activation(client_id, activation_id),
             ServerEvent::ClientAttachScroll {
                 client_id,
                 source,
@@ -2688,6 +2696,83 @@ impl HeadlessServer {
         )
     }
 
+    fn handle_client_notification_activation(
+        &mut self,
+        client_id: u64,
+        activation_id: u64,
+    ) -> bool {
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        if !client.is_full_app_client() || client.writer.is_none() {
+            return false;
+        }
+        let Some(pane_id) = client.take_notification_activation(activation_id, Instant::now())
+        else {
+            let _ = self.send_to_client(
+                client_id,
+                ServerMessage::NotificationActivationResolved {
+                    activation_id,
+                    focused: false,
+                },
+            );
+            return false;
+        };
+        let Some((ws_idx, _)) = self.app.find_pane(pane_id) else {
+            let _ = self.send_to_client(
+                client_id,
+                ServerMessage::NotificationActivationResolved {
+                    activation_id,
+                    focused: false,
+                },
+            );
+            return false;
+        };
+        let Some(public_pane_id) = self.app.public_pane_id(ws_idx, pane_id) else {
+            let _ = self.send_to_client(
+                client_id,
+                ServerMessage::NotificationActivationResolved {
+                    activation_id,
+                    focused: false,
+                },
+            );
+            return false;
+        };
+
+        let focus_response = self
+            .app
+            .runtime_pane_focus("notification-activate", public_pane_id);
+        if serde_json::from_str::<api::schema::SuccessResponse>(&focus_response).is_err() {
+            let _ = self.send_to_client(
+                client_id,
+                ServerMessage::NotificationActivationResolved {
+                    activation_id,
+                    focused: false,
+                },
+            );
+            return false;
+        }
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            if let Some(writer) = &client.writer {
+                let _ = writer.render.discard_pending();
+            }
+            client.request_repaint();
+        }
+        let foreground_changed = self.promote_client_to_foreground(client_id);
+        if foreground_changed {
+            self.resize_shared_runtime_to_effective_size_before_input();
+        }
+        self.sync_foreground_client_state();
+        let _ = self.send_to_client(
+            client_id,
+            ServerMessage::NotificationActivationResolved {
+                activation_id,
+                focused: true,
+            },
+        );
+        true
+    }
+
     fn agent_read_not_idle_error(
         &self,
         request: &api::schema::Request,
@@ -3141,12 +3226,22 @@ impl HeadlessServer {
         {
             if let Some(toast) = &toast_after {
                 debug!(title = %toast.title, body = %toast.context, "forwarding toast notification from API request");
-                self.send_notify_to_foreground_client(
-                    toast_notify_kind(self.app.state.toast_config.delivery)
-                        .expect("toast forwarding requires a client notification kind"),
-                    &toast.title,
-                    non_empty_body(&toast.context),
-                );
+                let kind = toast_notify_kind(self.app.state.toast_config.delivery)
+                    .expect("toast forwarding requires a client notification kind");
+                if let Some(target) = &toast.target {
+                    self.send_pane_notify_to_foreground_client(
+                        kind,
+                        &toast.title,
+                        non_empty_body(&toast.context),
+                        target.pane_id,
+                    );
+                } else {
+                    self.send_notify_to_foreground_client(
+                        kind,
+                        &toast.title,
+                        non_empty_body(&toast.context),
+                    );
+                }
                 true
             } else {
                 false
@@ -3239,11 +3334,12 @@ impl HeadlessServer {
                             *ws_idx,
                             *pane_id,
                         );
-                        self.send_notify_to_foreground_client(
+                        self.send_pane_notify_to_foreground_client(
                             toast_notify_kind(self.app.state.toast_config.delivery)
                                 .expect("toast forwarding requires a client notification kind"),
                             format!("{agent_label} {event_text}"),
                             non_empty_body(&context),
+                            *pane_id,
                         );
                     }
                 }

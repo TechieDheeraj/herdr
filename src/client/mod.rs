@@ -541,6 +541,28 @@ async fn run_client_loop(
 
     let mut endpoint_commands = endpoint_commands::EndpointCommands::default();
 
+    #[cfg(target_os = "macos")]
+    let (notification_activation_tx, notification_activation_rx) =
+        std::sync::mpsc::channel::<u64>();
+    #[cfg(target_os = "macos")]
+    let notification_activation_endpoint = if state.attach_escape.is_none() {
+        match crate::platform::NotificationActivationEndpoint::start(move |activation_id| {
+            let _ = notification_activation_tx.send(activation_id);
+        }) {
+            Ok(endpoint) => Some(endpoint),
+            Err(err) => {
+                warn!(err = %err, "desktop notification activation endpoint unavailable");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let mut awaiting_notification_activations = VecDeque::new();
+    #[cfg(target_os = "macos")]
+    let mut activate_terminal_after_render = None;
+
     // Spawn the stdin reader thread.
     let will_query_host_terminal_theme = state.attach_escape.is_none();
     let host_theme_query_pending = Arc::new(AtomicU32::new(0));
