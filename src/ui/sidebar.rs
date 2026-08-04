@@ -193,6 +193,7 @@ pub(crate) fn resolved_token_spans(
             | ResolvedTokenKind::Workspace(text)
             | ResolvedTokenKind::Tab(text)
             | ResolvedTokenKind::Pane(text)
+            | ResolvedTokenKind::Directory(text)
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::TerminalTitle(text)
             | ResolvedTokenKind::Branch(text)
@@ -298,6 +299,7 @@ pub(crate) fn resolved_token_spans(
             ResolvedTokenKind::Machine(text)
             | ResolvedTokenKind::Tab(text)
             | ResolvedTokenKind::Pane(text)
+            | ResolvedTokenKind::Directory(text)
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::Branch(text) => spans.push(Span::styled(
                 truncate_end(text, budgets[index]),
@@ -332,6 +334,18 @@ pub(crate) fn resolved_token_spans(
         }
     }
     spans
+}
+
+fn apply_custom_row_contrast(spans: &mut [Span<'_>], color: crate::sidebar_color::SidebarRowColor) {
+    let foreground = color.contrast();
+    let background = color.ratatui();
+    for span in spans {
+        span.style = span
+            .style
+            .fg(foreground)
+            .bg(background)
+            .remove_modifier(Modifier::DIM);
+    }
 }
 
 fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) -> Style {

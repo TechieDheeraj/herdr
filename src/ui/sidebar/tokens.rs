@@ -17,6 +17,7 @@ pub(crate) enum ResolvedTokenKind {
     Workspace(String),
     Tab(String),
     Pane(String),
+    Directory(String),
     Agent(String),
     TerminalTitle(String),
     Branch(String),
@@ -397,6 +398,53 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
             let rows = agent_rows(&config, context(&entry), "working");
             assert_eq!(rows[0][0].kind, ResolvedTokenKind::Agent("pi".into()));
         }
+    }
+
+    #[test]
+    fn default_rows_show_tab_and_directory_while_pane_or_tab_remains_available() {
+        let mut entry = entry();
+        let config = AgentsSidebarConfig::default();
+
+        assert_eq!(
+            agent_rows(&config, &entry, "working"),
+            vec![
+                vec![
+                    ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
+                    ResolvedToken::unstyled(ResolvedTokenKind::Workspace("repo".into())),
+                    ResolvedToken::unstyled(ResolvedTokenKind::Tab("1".into())),
+                ],
+                vec![
+                    ResolvedToken::unstyled(ResolvedTokenKind::Directory("src".into())),
+                    ResolvedToken::unstyled(ResolvedTokenKind::Agent("pi".into())),
+                ],
+            ]
+        );
+
+        let fallback_config = AgentsSidebarConfig {
+            rows: vec![vec![AgentSidebarToken::PaneOrTab]],
+            ..Default::default()
+        };
+        assert_eq!(
+            agent_rows(&fallback_config, &entry, "working"),
+            vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Pane(
+                "1".into()
+            ))]]
+        );
+
+        entry.pane_label = Some("tests".into());
+        entry.pane_or_tab_label = "tests".into();
+        assert_eq!(
+            agent_rows(&fallback_config, &entry, "working")[0][0],
+            ResolvedToken::unstyled(ResolvedTokenKind::Pane("tests".into()))
+        );
+    }
+
+    #[test]
+    fn directory_and_agent_use_the_standard_separator() {
+        let directory = ResolvedToken::unstyled(ResolvedTokenKind::Directory("src".into()));
+        let agent = ResolvedToken::unstyled(ResolvedTokenKind::Agent("codex".into()));
+
+        assert_eq!(separator(&directory, &agent), " · ");
     }
 
     #[test]

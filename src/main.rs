@@ -53,6 +53,7 @@ mod render_signal;
 mod selection;
 mod server;
 mod session;
+mod sidebar_color;
 mod sound;
 mod terminal;
 mod terminal_effects;
@@ -243,7 +244,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # sidebar_min_width = 18
 
 # Maximum sidebar width when expanded (columns)
-# sidebar_max_width = 36
+# sidebar_max_width = 80
 
 # Start with the sidebar collapsed. Changes take effect on the next launch.
 # sidebar_start_collapsed = false

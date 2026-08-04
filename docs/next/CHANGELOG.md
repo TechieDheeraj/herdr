@@ -264,6 +264,11 @@ This is a hotfix release for v0.9.2. See the v0.9.2 notes for the full feature r
 - Copy mode now supports `B`, `E`, and `W` motions over whitespace-delimited big words. (#2270, thanks @jplew)
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
 - Added a resizable expanded-sidebar Health Check section with server-host CPU, battery, RAM, and disk usage.
+- Added right-click color customization for complete Agent and Space sidebar rows and top tabs, with 12 preset colors, strict `#RGB`/`#RRGGBB` input, automatic readable text contrast, and a clear action.
+
+### Changed
+- Agent sidebar entries now show the workspace, tab, and optional pane name, followed by the agent launch directory and agent name.
+- Increased the default maximum expanded sidebar width from 36 to 80 columns so longer Agent and Space details can remain visible.
 
 ### Changed
 - Windows support is now generally available through stable releases and uses the stable update channel by default. Existing preview installs stay on preview until explicitly switched.
