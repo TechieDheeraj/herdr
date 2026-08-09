@@ -606,7 +606,8 @@ fn pane_created_without_client_uses_configured_headless_size() {
         Duration::from_secs(5),
     );
 
-    assert_eq!(size, (41, 132));
+    // The default pane title frame reserves one cell on each edge.
+    assert_eq!(size, (39, 130));
 
     cleanup_spawned_herdr(spawned, base);
 }
@@ -649,7 +650,8 @@ fn pane_created_after_detach_uses_configured_headless_size() {
         "ATTACHED_SIZE",
         Duration::from_secs(5),
     );
-    assert_eq!(attached_size, (50, 160));
+    // The default single-pane title frame uses one cell on each edge.
+    assert_eq!(attached_size, (48, 158));
 
     send_detach(&mut stream).expect("send detach");
     assert!(
@@ -676,7 +678,7 @@ fn pane_created_after_detach_uses_configured_headless_size() {
         Duration::from_secs(5),
     );
 
-    assert_eq!(headless_size, (41, 132));
+    assert_eq!(headless_size, (39, 130));
     assert_eq!(preserved_size, attached_size);
 
     cleanup_spawned_herdr(spawned, base);

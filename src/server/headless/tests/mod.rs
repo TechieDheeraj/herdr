@@ -1679,7 +1679,12 @@ async fn late_retained_fallback_leaves_all_client_baselines_unchanged() {
     };
     let linked = last_surface.as_mut().unwrap();
     linked.frame.hyperlinks.push("https://example.com".into());
-    linked.frame.cells[0].hyperlink = Some(0);
+    // The default single-pane title frame is chrome, not terminal content.
+    // Put the stale hyperlink in the first terminal cell overwritten below.
+    let inner = linked.panes[0].inner_rect;
+    let first_terminal_cell =
+        usize::from(inner.y) * usize::from(linked.frame.width) + usize::from(inner.x);
+    linked.frame.cells[first_terminal_cell].hyperlink = Some(0);
     let before = [7, 8].map(|id| {
         server.clients[&id]
             .render_state
@@ -2922,7 +2927,8 @@ async fn client_shell_input_targets_runtime_without_server_shell_classification(
             runtime_pane_id,
         )
         .expect("focused runtime");
-    assert_eq!(runtime.current_size(), (24, 79));
+    // Single-pane title borders plus the terminal scrollbar consume chrome cells.
+    assert_eq!(runtime.current_size(), (22, 77));
     assert!(input_rx.try_recv().is_err(), "legacy release emitted bytes");
     shutdown_test_runtimes(&mut server);
 }
@@ -6676,7 +6682,7 @@ fn client_shell_focus_promotes_and_reaches_reporting_pane() {
                 .get(&terminal_id)
                 .expect("focused runtime")
                 .current_size(),
-            (30, 99)
+            (28, 97)
         );
 
         assert!(server.handle_server_event(ServerEvent::ClientShellFocus {
@@ -6692,7 +6698,7 @@ fn client_shell_focus_promotes_and_reaches_reporting_pane() {
                 .get(&terminal_id)
                 .expect("focused runtime")
                 .current_size(),
-            (24, 79)
+            (22, 77)
         );
         assert_eq!(
             input_rx.try_recv().expect("focus gained input"),

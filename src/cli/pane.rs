@@ -159,19 +159,23 @@ fn move_pane(matches: &ArgMatches) -> Result<Method, ParseError> {
             };
             PaneMoveDestination::TabPlacement {
                 tab_id: super::normalize_tab_id(&tab),
-                target_pane_id: super::normalize_pane_id(&text("target-pane").ok_or_else(|| ParseError::Usage("missing required --target-pane".into()))?),
+                target_pane_id: super::normalize_pane_id(
+                    &text("target-pane").ok_or_else(|| {
+                        ParseError::Usage("missing required --target-pane".into())
+                    })?,
+                ),
                 placement,
                 moved_ratio: ratio,
             }
         } else {
-        let split =
-            text("split").ok_or_else(|| ParseError::Usage("missing required --split".into()))?;
-        PaneMoveDestination::Tab {
-            tab_id: super::normalize_tab_id(&tab),
-            target_pane_id: text("target-pane").map(|value| super::normalize_pane_id(&value)),
-            split: bindings::parse_choice(bindings::SPLITS, "split direction", &split)?,
-            ratio,
-        }
+            let split = text("split")
+                .ok_or_else(|| ParseError::Usage("missing required --split".into()))?;
+            PaneMoveDestination::Tab {
+                tab_id: super::normalize_tab_id(&tab),
+                target_pane_id: text("target-pane").map(|value| super::normalize_pane_id(&value)),
+                split: bindings::parse_choice(bindings::SPLITS, "split direction", &split)?,
+                ratio,
+            }
         }
     } else if matches.get_flag("new-tab") {
         PaneMoveDestination::NewTab {
@@ -255,18 +259,72 @@ mod tests {
 
     #[test]
     fn pane_projection_accepts_four_way_placement() {
-        for (name, placement) in [("left", PanePlacement::Left), ("right", PanePlacement::Right), ("above", PanePlacement::Above), ("below", PanePlacement::Below)] {
-            let parsed = request("move", &["issue-1", "--tab", "issue:2", "--target-pane", "issue-3", "--place", name, "--ratio", "0.25"]).unwrap();
-            let Method::PaneMove(params) = parsed.method else { panic!("expected pane move") };
-            assert_eq!(params.destination, PaneMoveDestination::TabPlacement {
-                tab_id: "issue:2".into(), target_pane_id: "issue-3".into(), placement, moved_ratio: Some(0.25),
-            });
+        for (name, placement) in [
+            ("left", PanePlacement::Left),
+            ("right", PanePlacement::Right),
+            ("above", PanePlacement::Above),
+            ("below", PanePlacement::Below),
+        ] {
+            let parsed = request(
+                "move",
+                &[
+                    "issue-1",
+                    "--tab",
+                    "issue:2",
+                    "--target-pane",
+                    "issue-3",
+                    "--place",
+                    name,
+                    "--ratio",
+                    "0.25",
+                ],
+            )
+            .unwrap();
+            let Method::PaneMove(params) = parsed.method else {
+                panic!("expected pane move")
+            };
+            assert_eq!(
+                params.destination,
+                PaneMoveDestination::TabPlacement {
+                    tab_id: "issue:2".into(),
+                    target_pane_id: "issue-3".into(),
+                    placement,
+                    moved_ratio: Some(0.25),
+                }
+            );
         }
         for values in [
             vec!["pane", "--tab", "tab", "--place", "above"],
-            vec!["pane", "--new-tab", "--target-pane", "target", "--place", "above"],
-            vec!["pane", "--tab", "tab", "--target-pane", "target", "--place", "above", "--split", "right"],
-            vec!["pane", "--tab", "tab", "--target-pane", "target", "--place", "above", "--ratio", "NaN"],
+            vec![
+                "pane",
+                "--new-tab",
+                "--target-pane",
+                "target",
+                "--place",
+                "above",
+            ],
+            vec![
+                "pane",
+                "--tab",
+                "tab",
+                "--target-pane",
+                "target",
+                "--place",
+                "above",
+                "--split",
+                "right",
+            ],
+            vec![
+                "pane",
+                "--tab",
+                "tab",
+                "--target-pane",
+                "target",
+                "--place",
+                "above",
+                "--ratio",
+                "NaN",
+            ],
         ] {
             assert!(request("move", &values).is_err());
         }

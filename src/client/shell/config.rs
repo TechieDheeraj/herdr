@@ -77,6 +77,7 @@ impl ClientShellState {
             .collect::<Vec<_>>();
         remote_collapsed_groups.sort_by(|left, right| left.profile_id.cmp(&right.profile_id));
         let preferences = preferences::ClientChromePreferences {
+            sidebar_health_split: self.sidebar_health_split,
             sidebar_width: self.sidebar_width_manual.then_some(self.sidebar_width),
             sidebar_section_split: self
                 .sidebar_section_split_manual
@@ -433,7 +434,7 @@ impl ClientShellConfig {
                 self.sidebar_min_width,
                 self.sidebar_max_width,
             )
-            .unwrap_or((18, 36));
+            .unwrap_or((18, 80));
             sidebar_width.clamp(min, max)
         }
         .min(cols.saturating_sub(1));
@@ -476,7 +477,7 @@ impl ClientShellConfig {
             .unwrap_or(self.sidebar_start_collapsed);
         let (min_width, max_width) =
             crate::config::validated_sidebar_bounds(self.sidebar_min_width, self.sidebar_max_width)
-                .unwrap_or((18, 36));
+                .unwrap_or((18, 80));
         let sidebar_width = self
             .preferences
             .sidebar_width

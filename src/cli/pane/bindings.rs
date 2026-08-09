@@ -336,15 +336,18 @@ pub(crate) fn destination() -> Field<PaneMoveDestination> {
         workspace_id: None,
         label: None,
     })
-    .input(value("tab", "TAB_ID").configure(|arg| {
-        arg.conflicts_with_all(["new-tab", "new-workspace"])
-    }))
+    .input(
+        value("tab", "TAB_ID")
+            .configure(|arg| arg.conflicts_with_all(["new-tab", "new-workspace"])),
+    )
     // Clap skips `requires` when the required arg conflicts with a present one,
     // so each destination's options also conflict with the other destinations.
     .input(value("split", "DIRECTION").configure(|arg| {
-        choices(arg, SPLITS)
-            .requires("tab")
-            .conflicts_with_all(["new-tab", "new-workspace", "place"])
+        choices(arg, SPLITS).requires("tab").conflicts_with_all([
+            "new-tab",
+            "new-workspace",
+            "place",
+        ])
     }))
     .input(value("place", "PLACEMENT").configure(|arg| {
         arg.value_parser(["left", "right", "above", "below"])

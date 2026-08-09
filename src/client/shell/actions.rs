@@ -424,6 +424,11 @@ impl ClientShellState {
                 method,
             }),
         });
+        if let Some(ClientShellAction::Endpoint { request, .. }) = outcome.actions.last() {
+            if let crate::api::schema::Method::PaneFocus(target) = &request.method {
+                outcome.repaint |= self.acknowledge_explicit_agent_focus(&target.pane_id);
+            }
+        }
         true
     }
 
@@ -569,6 +574,30 @@ impl ClientShellState {
         match pending.kind {
             PendingEndpointKind::Generic => {}
             PendingEndpointKind::PaneLinkResolve { .. } => unreachable!("handled above"),
+            PendingEndpointKind::PaneDragLayout {
+                started_at,
+                tab_id,
+                signature,
+            } => {
+                let mut outcome = ClientShellInput::default();
+                self.complete_pane_drag_layout(started_at, tab_id, signature, result, &mut outcome);
+                return (outcome.repaint, outcome.actions);
+            }
+            PendingEndpointKind::PaneDragDrop { origin } => {
+                let rejected = match result {
+                    Ok(crate::api::schema::ResponseResult::PaneMove { move_result }) => {
+                        !move_result.changed
+                    }
+                    Ok(crate::api::schema::ResponseResult::PaneSwap { swap }) => !swap.changed,
+                    Ok(_) => true,
+                    Err(_) => true,
+                };
+                let mut outcome = ClientShellInput::default();
+                if rejected {
+                    self.restore_pane_drag_origin(&origin, &mut outcome);
+                }
+                return (true, outcome.actions);
+            }
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {
                     Ok(_) => (false, Vec::new()),

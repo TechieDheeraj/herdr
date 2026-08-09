@@ -497,7 +497,7 @@ impl App {
         };
 
         self.state.focus_pane_in_workspace(ws_idx, pane_id);
-        self.state.mark_active_tab_seen();
+        self.state.mark_focused_pane_seen();
         self.state.mode = crate::app::Mode::Terminal;
 
         let Some(pane) = self.pane_info(ws_idx, pane_id) else {
@@ -1209,7 +1209,6 @@ impl App {
                             source_ws_idx,
                             source_pane_id,
                         );
-                        self.state.settle_terminal_mode_after_focus();
                     }
                     self.state.mark_session_dirty();
                     self.schedule_session_save();
@@ -3603,6 +3602,109 @@ mod tests {
             Some(&source_terminal)
         );
     }
+    #[test]
+    fn api_pane_move_repositions_within_tab_without_detaching_runtime_identity() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let target = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        let source_terminal = app.state.workspaces[0].tabs[0]
+            .terminal_id(source)
+            .unwrap()
+            .clone();
+        seed_terminal_states(&mut app);
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let target_public = app.public_pane_id(0, target).unwrap();
+        let tab_public = app.public_tab_id(0, 0).unwrap();
+        let next_auto_number = app.state.workspaces[0].tabs[0].next_auto_pane_number;
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public.clone(),
+                destination: PaneMoveDestination::TabPlacement {
+                    tab_id: tab_public,
+                    target_pane_id: target_public,
+                    placement: crate::layout::PanePlacement::Above,
+                    moved_ratio: Some(0.25),
+                },
+                focus: true,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert!(move_result.changed);
+        assert_eq!(move_result.previous_pane_id, source_public);
+        assert_eq!(move_result.pane.pane_id, source_public);
+        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(move_result.pane.display_label.as_deref(), Some("pane 1"));
+        assert!(move_result.source_layout.is_none());
+        assert_eq!(app.state.workspaces[0].tabs[0].layout.focused(), source);
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].terminal_id(source),
+            Some(&source_terminal)
+        );
+        assert_eq!(
+            app.state.workspaces[0].tabs[0].next_auto_pane_number,
+            next_auto_number
+        );
+        let panes = app.state.workspaces[0].tabs[0]
+            .layout
+            .panes(ratatui::layout::Rect::new(0, 0, 100, 40));
+        let source_rect = panes.iter().find(|pane| pane.id == source).unwrap().rect;
+        let target_rect = panes.iter().find(|pane| pane.id == target).unwrap().rect;
+        assert_eq!(source_rect, ratatui::layout::Rect::new(0, 0, 100, 10));
+        assert_eq!(target_rect, ratatui::layout::Rect::new(0, 10, 100, 30));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn api_pane_move_places_cross_tab_pane_and_assigns_destination_auto_name() {
+        let mut app = app_with_linked_worktree();
+        let source = app.state.workspaces[0].tabs[0].root_pane;
+        let source_terminal = app.state.workspaces[0].tabs[0]
+            .terminal_id(source)
+            .unwrap()
+            .clone();
+        let target_tab = app.state.workspaces[0].test_add_tab(Some("target"));
+        let target = app.state.workspaces[0].tabs[target_tab].root_pane;
+        seed_terminal_states(&mut app);
+        let source_public = app.public_pane_id(0, source).unwrap();
+        let target_public = app.public_pane_id(0, target).unwrap();
+        let target_tab_public = app.public_tab_id(0, target_tab).unwrap();
+
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: source_public.clone(),
+                destination: PaneMoveDestination::TabPlacement {
+                    tab_id: target_tab_public,
+                    target_pane_id: target_public,
+                    placement: crate::layout::PanePlacement::Left,
+                    moved_ratio: Some(0.25),
+                },
+                focus: false,
+            },
+        );
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response");
+        };
+        assert!(move_result.changed);
+        assert_eq!(move_result.pane.pane_id, source_public);
+        assert_eq!(move_result.pane.terminal_id, source_terminal.to_string());
+        assert_eq!(move_result.pane.display_label.as_deref(), Some("pane 2"));
+        assert_eq!(app.state.workspaces[0].tabs.len(), 1);
+        let tab = &app.state.workspaces[0].tabs[0];
+        assert_eq!(tab.layout.pane_ids(), vec![source, target]);
+        assert_eq!(tab.layout.focused(), target);
+        assert_eq!(tab.next_auto_pane_number, 3);
+        app.state.assert_invariants_for_test();
+    }
+
     #[test]
     fn api_pane_move_to_existing_tab_across_workspace_reassigns_public_pane_id() {
         let mut app = app_with_linked_worktree();

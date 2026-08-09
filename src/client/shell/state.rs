@@ -102,6 +102,7 @@ pub(super) struct ShellHitMap {
     pub(super) agent_sort_toggle: Rect,
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
+    pub(super) sidebar_health_divider: Rect,
     pub(super) sidebar_toggle: Rect,
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
@@ -118,6 +119,7 @@ pub(super) struct ShellHitMap {
     pub(super) overlay_primary: Rect,
     pub(super) overlay_clear: Rect,
     pub(super) overlay_cancel: Rect,
+    pub(super) color_swatches: Vec<Rect>,
     pub(super) navigator_popup: Rect,
     pub(super) navigator_search: Rect,
     pub(super) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
@@ -189,6 +191,7 @@ pub(super) struct ClientTabPress {
 pub(super) enum ClientChromeDrag {
     SidebarWidth,
     SidebarSection,
+    SidebarHealth,
     WorkspaceScrollbar {
         grab_row_offset: u16,
     },
@@ -278,6 +281,7 @@ pub(super) enum ClientShellMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientShellOverlayKind {
+    RowColor,
     Onboarding,
     ProductAnnouncement,
     ReleaseNotes,
@@ -511,6 +515,8 @@ pub(super) struct ClientWorktreeRemoveOverlay {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ClientContextMenuAction {
+    MarkUnread,
+    Color,
     Rename,
     Close,
     NewWorktree,
@@ -530,6 +536,10 @@ pub(super) enum ClientContextMenuAction {
 
 #[derive(Debug)]
 pub(super) enum ClientContextMenuTarget {
+    Agent {
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+    },
     Workspace {
         workspace_id: String,
         is_git: bool,
@@ -582,6 +592,7 @@ pub(super) struct ClientConfirmCloseOverlay {
 
 #[derive(Debug)]
 pub(super) enum ClientShellOverlay {
+    RowColor(super::row_colors::RowColorPicker),
     Onboarding,
     ProductAnnouncement(crate::app::state::ProductAnnouncementState),
     ReleaseNotes(crate::app::state::ReleaseNotesState),
@@ -600,6 +611,7 @@ pub(super) enum ClientShellOverlay {
 impl ClientShellOverlay {
     pub(super) fn kind(&self) -> ClientShellOverlayKind {
         match self {
+            Self::RowColor(_) => ClientShellOverlayKind::RowColor,
             Self::Onboarding => ClientShellOverlayKind::Onboarding,
             Self::ProductAnnouncement(_) => ClientShellOverlayKind::ProductAnnouncement,
             Self::ReleaseNotes(_) => ClientShellOverlayKind::ReleaseNotes,
@@ -620,6 +632,14 @@ impl ClientShellOverlay {
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
     Generic,
+    PaneDragLayout {
+        started_at: std::time::Instant,
+        tab_id: String,
+        signature: u64,
+    },
+    PaneDragDrop {
+        origin: super::pane_drag::PaneDragOrigin,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
@@ -725,6 +745,8 @@ pub(crate) enum ClientShellNotificationEffect {
         body: Option<String>,
         #[cfg(windows)]
         target: Option<ClientSystemNotificationTarget>,
+        #[cfg(not(windows))]
+        target: Option<ClientNotificationTarget>,
     },
 }
 
@@ -876,8 +898,14 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_width_manual: bool,
     pub(super) sidebar_section_split: f32,
     pub(super) sidebar_section_split_manual: bool,
+    pub(super) sidebar_health_split: Option<f32>,
+    pub(super) workspace_colors: super::row_colors::EndpointRowColors,
+    pub(super) tab_colors: super::row_colors::EndpointRowColors,
     pub(super) agent_panel_sort_manual: bool,
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
+    pub(super) last_workspace_blank_click:
+        Option<(ClientEndpointId, (u16, u16), std::time::Instant)>,
+    pub(super) pane_drag: Option<super::pane_drag::ClientPaneDrag>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
     pub(super) workspace_press: Option<ClientWorkspacePress>,
     pub(super) tab_press: Option<ClientTabPress>,
@@ -1007,7 +1035,7 @@ impl ClientShellState {
             config.sidebar_min_width,
             config.sidebar_max_width,
         )
-        .unwrap_or((18, 36));
+        .unwrap_or((18, 80));
         let sidebar_width = preferences
             .sidebar_width
             .unwrap_or(config.sidebar_width)
@@ -1050,8 +1078,15 @@ impl ClientShellState {
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             sidebar_section_split,
             sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
+            sidebar_health_split: preferences
+                .sidebar_health_split
+                .filter(|split| split.is_finite()),
+            workspace_colors: HashMap::new(),
+            tab_colors: HashMap::new(),
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
             last_sidebar_divider_click: None,
+            last_workspace_blank_click: None,
+            pane_drag: None,
             chrome_drag: None,
             workspace_press: None,
             tab_press: None,
@@ -1276,6 +1311,8 @@ impl ClientShellState {
             .startup_onboarding
             .then_some(ClientShellOverlay::Onboarding);
         self.previous_pane_id = None;
+        self.pane_drag = None;
+        self.last_workspace_blank_click = None;
         self.pane_mouse_gesture = None;
         self.link_hover = None;
         self.url_click_consumes_until_up = false;
@@ -1884,6 +1921,7 @@ impl ClientShellState {
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)
+            .chain(self.pane_drag_deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now).min(default))
             .unwrap_or(default)

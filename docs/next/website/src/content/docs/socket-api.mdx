@@ -128,8 +128,8 @@ again after reconnecting or when the local cache may be stale. Attached worktree
 records. Full repo worktree discovery remains `worktree.list`.
 
 The snapshot also includes the latest server-host `health` sample. The health
-object can contain `cpu_usage_percentage`, `battery`, `ram`, and `disk`;
-unavailable metrics are omitted. Health is a point-in-time value, so clients
+object can contain `cpu_usage_percentage`, `temperature_celsius`, `battery`, `ram`, and `disk`;
+unavailable metrics are null. Health is a point-in-time value, so clients
 that need a fresher sample can request `session.snapshot` again.
 
 From the CLI, `herdr api snapshot` prints the live `session.snapshot` response

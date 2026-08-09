@@ -249,10 +249,11 @@ pub(super) fn render_expanded(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
+    let primary_area = super::health_check::primary_area(area, state.sidebar_health_split);
     let (workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
+        crate::ui::expanded_sidebar_sections(primary_area, state.sidebar_section_split);
     hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+        crate::ui::sidebar_section_divider_rect(primary_area, state.sidebar_section_split);
     put_text(
         buffer,
         workspace_area.x,
@@ -301,7 +302,7 @@ pub(super) fn render_expanded(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
-    let row_heights = rows
+    let mut row_heights = rows
         .iter()
         .map(|row| match row {
             Row::Endpoint(_) => 1,
@@ -334,7 +335,7 @@ pub(super) fn render_expanded(
             }
         })
         .collect::<Vec<_>>();
-    let gaps = rows
+    let mut gaps = rows
         .iter()
         .enumerate()
         .map(|(index, row)| match (row, rows.get(index + 1)) {
@@ -348,6 +349,10 @@ pub(super) fn render_expanded(
             _ => 0,
         })
         .collect::<Vec<_>>();
+    // Keep a blank drop/click target reachable after the final workspace without
+    // changing the gaps between real workspace rows or machine sections.
+    row_heights.push(1);
+    gaps.push(0);
     let reveal_navigation = !body.is_empty() && std::mem::take(state.reveal_navigation_workspace);
     let reveal_focus = !body.is_empty() && std::mem::take(state.reveal_focused_workspace);
     if reveal_navigation || reveal_focus {
@@ -497,6 +502,13 @@ pub(super) fn render_expanded(
                     collapsed_groups,
                     palette,
                 );
+                if let Some(color) = super::row_colors::lookup(
+                    state.workspace_colors,
+                    &endpoint.endpoint_id,
+                    &workspace.workspace_id,
+                ) {
+                    super::row_colors::apply_contrast(buffer, rect, color);
+                }
                 hits.workspaces.push(WorkspaceHit {
                     rect,
                     endpoint_id: endpoint.endpoint_id.clone(),
@@ -561,6 +573,14 @@ pub(super) fn render_expanded(
         state.active_endpoint_id,
         config,
         state.agent_scroll,
+        hits,
+    );
+    super::health_check::render(
+        buffer,
+        area,
+        active_snapshot,
+        state.sidebar_health_split,
+        palette,
         hits,
     );
     hits.sidebar_toggle = Rect::new(

@@ -643,8 +643,8 @@ use windows_sys::{
             Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
             SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
             Threading::{
-                GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, GetSystemTimes, IsWow64Process2,
-                OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread,
+                GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, GetSystemTimes,
+                IsWow64Process2, OpenProcess, OpenThread, QueryFullProcessImageNameW, ResumeThread,
                 TerminateProcess, CREATE_NO_WINDOW, CREATE_SUSPENDED, DETACHED_PROCESS,
                 PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION,
                 PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, THREAD_SUSPEND_RESUME,
@@ -1157,10 +1157,36 @@ pub(crate) fn local_datetime() -> Option<time::PrimitiveDateTime> {
 pub(crate) fn health_probe() -> crate::health::PlatformHealthProbe {
     crate::health::PlatformHealthProbe {
         cpu_times: read_cpu_times(),
+        temperature_celsius: read_temperature_celsius(),
         battery: read_battery_health(),
         ram: read_memory_usage(),
         disk: read_disk_usage(),
     }
+}
+
+fn read_temperature_celsius() -> Option<i16> {
+    #[derive(serde::Deserialize)]
+    struct ThermalZoneTemperature {
+        #[serde(rename = "CurrentTemperature")]
+        current_temperature: u32,
+    }
+
+    let connection = wmi::WMIConnection::with_namespace_path("ROOT\\WMI").ok()?;
+    let readings: Vec<ThermalZoneTemperature> = connection
+        .raw_query(
+            "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature WHERE Active = TRUE",
+        )
+        .ok()?;
+    readings
+        .into_iter()
+        .filter_map(|reading| {
+            crate::health::celsius_from_scaled(
+                i64::from(reading.current_temperature),
+                100,
+                -273_150,
+            )
+        })
+        .max()
 }
 
 fn filetime_ticks(value: FILETIME) -> u64 {

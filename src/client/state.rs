@@ -79,6 +79,7 @@ pub(super) struct ClientState {
     pub(super) deferred_local_activation: Option<endpoint::EndpointActivationIntent>,
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
+    pub(super) notification_activations: super::notification_activation::NotificationActivations,
     pub(super) shell: Option<shell::ClientShellState>,
 }
 
@@ -140,6 +141,7 @@ impl ClientState {
             deferred_local_activation: None,
             draw_host_cursor: false,
             detached_process_children: Vec::new(),
+            notification_activations: Default::default(),
             shell: Some(shell::ClientShellState::new(
                 shell::ClientShellConfig::from_config(&crate::config::Config::default()),
             )),
@@ -367,6 +369,9 @@ impl ClientState {
         } else {
             "client_surface_patch.fallback.commit"
         });
+        if committed {
+            self.finish_presented_notification_activation();
+        }
         Ok(committed)
     }
 
@@ -588,7 +593,14 @@ impl ClientState {
         }
         self.blit_encoder.commit(frame_data, encoded);
         self.repaint_pending = false;
+        self.finish_presented_notification_activation();
         true
+    }
+
+    fn finish_presented_notification_activation(&mut self) {
+        if let Some(shell) = self.shell.as_ref() {
+            self.notification_activations.frame_presented(shell);
+        }
     }
 }
 

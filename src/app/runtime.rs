@@ -4,7 +4,8 @@ use std::time::Instant;
 use std::time::Duration;
 
 use super::{
-    background_update_check_enabled, App, AUTO_UPDATE_CHECK_INTERVAL, MIN_RENDER_INTERVAL,
+    background_update_check_enabled, App, AUTO_UPDATE_CHECK_INTERVAL, HEALTH_SAMPLE_INTERVAL,
+    MIN_RENDER_INTERVAL,
 };
 fn retain_detached_process_after_wait(
     pid: u32,
@@ -140,6 +141,39 @@ impl App {
         }
     }
 
+    pub(crate) fn start_health_sample_if_due(&mut self, now: Instant) {
+        if self.health_sample_in_flight
+            || self
+                .next_health_sample
+                .is_none_or(|deadline| now < deadline)
+        {
+            return;
+        }
+
+        self.health_sample_in_flight = true;
+        self.next_health_sample = None;
+        let sampler = std::sync::Arc::clone(&self.health_sampler);
+        let event_tx = self.event_tx.clone();
+        let spawn_result = std::thread::Builder::new()
+            .name("herdr-health-sample".into())
+            .spawn(move || {
+                let snapshot = match sampler.lock() {
+                    Ok(mut sampler) => sampler.sample(),
+                    Err(err) => {
+                        tracing::warn!(err = %err, "health sampler lock was poisoned");
+                        crate::health::HealthSnapshot::default()
+                    }
+                };
+                let _ = event_tx
+                    .blocking_send(crate::events::AppEvent::HealthMetricsSampled { snapshot });
+            });
+        if let Err(err) = spawn_result {
+            self.health_sample_in_flight = false;
+            self.next_health_sample = Some(now + HEALTH_SAMPLE_INTERVAL);
+            tracing::warn!(err = %err, "failed to start health sampler");
+        }
+    }
+
     pub(crate) fn next_headless_loop_deadline_with_git_refresh(
         &self,
         now: Instant,
@@ -171,7 +205,6 @@ impl App {
             self.pending_host_appearance_deadline,
             self.session_save_deadline,
             self.next_tab_bar_status_deadline(),
-            self.pane_drag_deadline(),
             render_deadline,
         ]
         .into_iter()
@@ -244,7 +277,7 @@ mod tests {
     fn sampled_health_updates_pure_state_and_reschedules_collection() {
         let mut app = super::super::App::new(
             &crate::config::Config::default(),
-            true,
+            super::super::AppPolicy::TEST,
             None,
             tokio::sync::mpsc::unbounded_channel().1,
             crate::api::EventHub::default(),

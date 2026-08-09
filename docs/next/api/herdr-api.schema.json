@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "protocol": 22,
+  "protocol": 23,
   "schema_version": 1,
   "schemas": {
     "error_response": {
@@ -5437,22 +5437,6 @@
         {
           "properties": {
             "method": {
-              "const": "agent.mark_unread",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/schemas/request/$defs/AgentTarget"
-            }
-          },
-          "required": [
-            "method",
-            "params"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "method": {
               "const": "agent.start",
               "type": "string"
             },
@@ -6377,6 +6361,22 @@
             "params"
           ],
           "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.mark_unread",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
         }
       ],
       "properties": {
@@ -6844,6 +6844,7 @@
         "BatteryHealth": {
           "properties": {
             "charging": {
+              "default": null,
               "type": [
                 "boolean",
                 "null"
@@ -7580,9 +7581,11 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "default": null
             },
             "cpu_usage_percentage": {
+              "default": null,
               "format": "uint8",
               "maximum": 255,
               "minimum": 0,
@@ -7599,7 +7602,8 @@
                 {
                   "type": "null"
                 }
-              ]
+              ],
+              "default": null
             },
             "ram": {
               "anyOf": [
@@ -7609,6 +7613,17 @@
                 {
                   "type": "null"
                 }
+              ],
+              "default": null
+            },
+            "temperature_celsius": {
+              "default": null,
+              "format": "int16",
+              "maximum": 32767,
+              "minimum": -32768,
+              "type": [
+                "integer",
+                "null"
               ]
             }
           },
@@ -10641,7 +10656,13 @@
             },
             "health": {
               "$ref": "#/schemas/success_response/$defs/HealthSnapshot",
-              "default": {}
+              "default": {
+                "battery": null,
+                "cpu_usage_percentage": null,
+                "disk": null,
+                "ram": null,
+                "temperature_celsius": null
+              }
             },
             "layouts": {
               "items": {

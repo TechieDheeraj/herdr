@@ -328,6 +328,7 @@ impl ClientShellState {
                 RawInputEvent::OuterFocusLost => {
                     outcome.repaint |= self.clear_link_hover();
                     self.outer_focused = Some(false);
+                    self.cancel_pane_drag(&mut outcome);
                     self.release_input_leases(&mut outcome);
                     outcome
                         .requests
@@ -607,6 +608,12 @@ impl ClientShellState {
         key: &crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) -> Option<ClientInputTarget> {
+        if self.pane_drag.is_some() && !matches!(key.code, KeyCode::Modifier(_)) {
+            self.cancel_pane_drag(outcome);
+            if key.code == KeyCode::Esc {
+                return None;
+            }
+        }
         if self.handle_modal_paste_shortcut_with(key, outcome, crate::platform::read_clipboard_text)
         {
             return None;

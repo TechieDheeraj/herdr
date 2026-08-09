@@ -68,6 +68,9 @@ impl ClientShellState {
             reveal_focused_tab: &mut self.reveal_focused_tab,
             sidebar_collapsed: false,
             sidebar_section_split: self.sidebar_section_split,
+            sidebar_health_split: self.sidebar_health_split,
+            workspace_colors: &self.workspace_colors,
+            tab_colors: &self.tab_colors,
             tab_drag_insert_index: None,
             selected_workspace_id: self
                 .navigate_workspace_id
@@ -224,6 +227,9 @@ impl ClientShellState {
                 reveal_focused_tab: &mut self.reveal_focused_tab,
                 sidebar_collapsed: self.sidebar_collapsed,
                 sidebar_section_split: self.sidebar_section_split,
+                sidebar_health_split: self.sidebar_health_split,
+                workspace_colors: &self.workspace_colors,
+                tab_colors: &self.tab_colors,
                 tab_drag_insert_index,
                 selected_workspace_id: self
                     .navigate_workspace_id
@@ -675,6 +681,7 @@ impl ClientShellState {
                 self.hits.overlay_primary = rendered.primary;
                 self.hits.overlay_clear = rendered.clear;
                 self.hits.overlay_cancel = rendered.cancel;
+                self.hits.color_swatches = rendered.color_swatches;
                 self.hits.navigator_popup = rendered.navigator_popup;
                 self.hits.navigator_search = rendered.navigator_search;
                 self.hits.navigator_rows = rendered.navigator_rows;
@@ -720,6 +727,7 @@ impl ClientShellState {
             self.hits.pane_splits.clear();
             self.hits.popup = None;
         }
+        self.compose_pane_drag_preview(&mut frame, &mut occlusion);
         let graphics = self.compose_graphics(layout, &occlusion);
         Some(crate::client::frame_output::ComposedFrame { frame, graphics })
     }

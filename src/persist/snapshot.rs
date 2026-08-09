@@ -291,6 +291,7 @@ pub fn capture(
         selected,
         sidebar_width: None,
         sidebar_section_split: None,
+        sidebar_health_section_split: None,
         collapsed_space_keys: std::collections::HashSet::new(),
     }
 }

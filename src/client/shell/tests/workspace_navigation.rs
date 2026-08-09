@@ -148,6 +148,8 @@ fn local_navigation_highlight_stays_visible_with_terminal_theme() {
 
 #[test]
 fn navigation_highlights_only_the_preview_and_activates_on_enter() {
+    // All compared workspace rows must fit above the six-row Health Check panel.
+    const ROWS: u16 = 34;
     for (compact, cols) in [(true, 100), (false, 100), (false, 44)] {
         for terminal_theme in [false, true] {
             let (mut state, remote) = navigation_state(workspaces(2));
@@ -155,7 +157,7 @@ fn navigation_highlights_only_the_preview_and_activates_on_enter() {
             if terminal_theme {
                 state.config.palette = Palette::terminal();
             }
-            state.compose(cols, 28).unwrap();
+            state.compose(cols, ROWS).unwrap();
             enter_navigation(&mut state);
             for (endpoint, collision, steps) in [
                 (&ClientEndpointId::Local, &remote, 1),
@@ -166,7 +168,7 @@ fn navigation_highlights_only_the_preview_and_activates_on_enter() {
                 }
                 assert_selected(&state, endpoint, "ws_2");
                 let buffer = state
-                    .compose(cols, 28)
+                    .compose(cols, ROWS)
                     .unwrap()
                     .to_ratatui_buffer()
                     .unwrap();

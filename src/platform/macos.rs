@@ -207,12 +207,25 @@ pub(crate) fn should_query_host_terminal_palette() -> bool {
 pub(crate) fn health_probe() -> crate::health::PlatformHealthProbe {
     crate::health::PlatformHealthProbe {
         cpu_times: read_cpu_times(),
+        temperature_celsius: command_stdout("/usr/sbin/ioreg", &["-r", "-n", "AppleSmartBattery"])
+            .as_deref()
+            .and_then(parse_battery_temperature),
         battery: command_stdout("/usr/bin/pmset", &["-g", "batt"])
             .as_deref()
             .and_then(parse_battery_health),
         ram: read_memory_usage(),
         disk: read_disk_usage("/"),
     }
+}
+
+fn parse_battery_temperature(contents: &str) -> Option<i16> {
+    let raw = contents.lines().find_map(|line| {
+        let (key, value) = line.trim().split_once('=')?;
+        (key.trim() == "\"Temperature\"")
+            .then(|| value.trim().parse::<u32>().ok())
+            .flatten()
+    })?;
+    crate::health::celsius_from_scaled(i64::from(raw), 100, -273_150)
 }
 
 fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
@@ -1561,6 +1574,17 @@ mod tests {
                 charging: Some(true),
             })
         );
+    }
+
+    #[test]
+    fn health_parses_macos_battery_temperature() {
+        assert_eq!(
+            parse_battery_temperature(
+                "{\n  \"Temperature\" = 3073\n  \"VirtualTemperature\" = 3409\n}\n"
+            ),
+            Some(34)
+        );
+        assert_eq!(parse_battery_temperature("{\n}\n"), None);
     }
 
     #[test]

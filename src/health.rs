@@ -22,7 +22,7 @@ impl ResourceUsage {
 )]
 pub struct BatteryHealth {
     pub percentage: u8,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub charging: Option<bool>,
 }
 
@@ -30,13 +30,17 @@ pub struct BatteryHealth {
     Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
 )]
 pub struct HealthSnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // These options also travel over the internal bincode snapshot. Keep absent
+    // values encoded as None/null; skipping fields would corrupt that stream.
+    #[serde(default)]
     pub cpu_usage_percentage: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub temperature_celsius: Option<i16>,
+    #[serde(default)]
     pub battery: Option<BatteryHealth>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ram: Option<ResourceUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub disk: Option<ResourceUsage>,
 }
 
@@ -49,6 +53,7 @@ pub(crate) struct CpuTimes {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PlatformHealthProbe {
     pub(crate) cpu_times: Option<CpuTimes>,
+    pub(crate) temperature_celsius: Option<i16>,
     pub(crate) battery: Option<BatteryHealth>,
     pub(crate) ram: Option<ResourceUsage>,
     pub(crate) disk: Option<ResourceUsage>,
@@ -69,11 +74,38 @@ impl HealthSampler {
 
         HealthSnapshot {
             cpu_usage_percentage,
+            temperature_celsius: probe.temperature_celsius,
             battery: probe.battery,
             ram: probe.ram,
             disk: probe.disk,
         }
     }
+}
+
+pub(crate) fn celsius_from_scaled(
+    value: i64,
+    millidegrees_per_unit: i64,
+    zero_offset_millidegrees: i64,
+) -> Option<i16> {
+    if millidegrees_per_unit <= 0 {
+        return None;
+    }
+    let millidegrees = value
+        .checked_mul(millidegrees_per_unit)?
+        .checked_add(zero_offset_millidegrees)?;
+    let rounded = if millidegrees >= 0 {
+        millidegrees.saturating_add(500) / 1_000
+    } else {
+        millidegrees.saturating_sub(500) / 1_000
+    };
+    valid_temperature_celsius(rounded)
+}
+
+fn valid_temperature_celsius(value: i64) -> Option<i16> {
+    (-100..=200)
+        .contains(&value)
+        .then(|| i16::try_from(value).ok())
+        .flatten()
 }
 
 fn cpu_usage_percentage(previous: Option<CpuTimes>, current: Option<CpuTimes>) -> Option<u8> {
@@ -142,5 +174,16 @@ mod tests {
             })
         );
         assert_eq!(ResourceUsage::new(0, 0), None);
+    }
+
+    #[test]
+    fn temperature_conversions_round_and_reject_implausible_values() {
+        assert_eq!(celsius_from_scaled(42_499, 1, 0), Some(42));
+        assert_eq!(celsius_from_scaled(42_500, 1, 0), Some(43));
+        assert_eq!(celsius_from_scaled(-10_500, 1, 0), Some(-11));
+        assert_eq!(celsius_from_scaled(3_073, 100, -273_150), Some(34));
+        assert_eq!(celsius_from_scaled(250_000, 1, 0), None);
+        assert_eq!(celsius_from_scaled(0, 100, -273_150), None);
+        assert_eq!(celsius_from_scaled(42, 0, 0), None);
     }
 }

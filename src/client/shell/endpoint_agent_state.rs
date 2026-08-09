@@ -13,6 +13,8 @@ pub(super) struct EndpointAgentPresentation {
         Option<u64>,
         crate::protocol::endpoint::EndpointAgentCompletions,
     )>,
+    manual_unread: HashMap<String, u64>,
+    last_presented_focus: Option<String>,
 }
 
 impl EndpointAgentPresentation {
@@ -35,6 +37,10 @@ impl EndpointAgentPresentation {
         self.pending_completions = Some((generation, completions));
     }
 
+    pub(super) fn leave_surface(&mut self) {
+        self.last_presented_focus = None;
+    }
+
     #[cfg(test)]
     pub(super) fn project_snapshot(&mut self, snapshot: &mut ClientShellSnapshot) {
         self.project_snapshot_for_generation(snapshot, None);
@@ -50,6 +56,8 @@ impl EndpointAgentPresentation {
             self.acknowledged.clear();
             self.completed.clear();
             self.working.clear();
+            self.manual_unread.clear();
+            self.last_presented_focus = None;
             self.acknowledged.extend(
                 snapshot
                     .agents
@@ -77,6 +85,12 @@ impl EndpointAgentPresentation {
                     && projection.revision == snapshot.revision
             })
             .map(|(_, projection)| projection.completions);
+        self.manual_unread.retain(|pane_id, sequence| {
+            snapshot
+                .agents
+                .iter()
+                .any(|agent| &agent.pane_id == pane_id && agent.state_change_seq == *sequence)
+        });
         for agent in &mut snapshot.agents {
             match agent.agent_status {
                 AgentStatus::Working => {
@@ -129,19 +143,31 @@ impl EndpointAgentPresentation {
             return false;
         }
 
+        let focused = surface.panes.iter().find(|pane| {
+            pane.focused && snapshot.focused_pane_id.as_deref() == Some(pane.pane_id.as_str())
+        });
+        let focus_changed =
+            self.last_presented_focus.as_deref() != focused.map(|pane| pane.pane_id.as_str());
+        if focus_changed {
+            self.last_presented_focus = focused.map(|pane| pane.pane_id.clone());
+        }
         let mut changed = false;
-        for pane in &surface.panes {
-            let Some(agent) = snapshot
-                .agents
-                .iter()
-                .find(|agent| agent.pane_id == pane.pane_id)
-            else {
-                continue;
-            };
-            let acknowledged = self.acknowledged.entry(agent.pane_id.clone()).or_default();
-            if *acknowledged < agent.state_change_seq {
-                *acknowledged = agent.state_change_seq;
-                changed = true;
+        if let Some(pane) = focused {
+            if focus_changed {
+                changed |= self.manual_unread.remove(&pane.pane_id).is_some();
+            }
+            if !self.manual_unread.contains_key(&pane.pane_id) {
+                if let Some(agent) = snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane.pane_id)
+                {
+                    let acknowledged = self.acknowledged.entry(agent.pane_id.clone()).or_default();
+                    if *acknowledged < agent.state_change_seq {
+                        *acknowledged = agent.state_change_seq;
+                        changed = true;
+                    }
+                }
             }
         }
         if changed {
@@ -154,11 +180,54 @@ impl EndpointAgentPresentation {
     }
 
     pub(super) fn seen(&self, agent: &ClientShellAgent) -> bool {
-        self.completed.get(&agent.pane_id).is_none_or(|completion| {
-            self.acknowledged
-                .get(&agent.pane_id)
-                .is_some_and(|sequence| sequence >= completion)
-        })
+        !self.manual_unread.contains_key(&agent.pane_id)
+            && self.completed.get(&agent.pane_id).is_none_or(|completion| {
+                self.acknowledged
+                    .get(&agent.pane_id)
+                    .is_some_and(|sequence| sequence >= completion)
+            })
+    }
+
+    pub(super) fn mark_unread(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        pane_id: &str,
+    ) -> bool {
+        let Some(agent) = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)
+        else {
+            return false;
+        };
+        self.manual_unread
+            .insert(pane_id.to_owned(), agent.state_change_seq);
+        self.last_presented_focus = snapshot.focused_pane_id.clone();
+        self.reproject_statuses(snapshot);
+        true
+    }
+
+    pub(super) fn acknowledge_explicit_focus(
+        &mut self,
+        snapshot: &mut ClientShellSnapshot,
+        pane_id: &str,
+    ) -> bool {
+        // A click on an already focused pane is an explicit acknowledgement too.
+        // Background targets wait for their coherent focused surface instead.
+        if snapshot.focused_pane_id.as_deref() != Some(pane_id)
+            || self.manual_unread.remove(pane_id).is_none()
+        {
+            return false;
+        }
+        self.reproject_statuses(snapshot);
+        true
+    }
+
+    fn reproject_statuses(&self, snapshot: &mut ClientShellSnapshot) {
+        for agent in &mut snapshot.agents {
+            agent.agent_status = self.projected_status(agent);
+        }
+        project_aggregate_status(snapshot);
     }
 
     fn projected_status(&self, agent: &ClientShellAgent) -> AgentStatus {
@@ -230,6 +299,7 @@ mod tests {
         let mut snapshot = crate::client::shell::tests::snapshot();
         snapshot.boot_id = "endpoint-boot".into();
         snapshot.revision = revision;
+        snapshot.focused_pane_id = Some("agent-pane".into());
         snapshot.agents = vec![agent(status, sequence)];
         snapshot
     }
@@ -397,6 +467,27 @@ mod tests {
     }
 
     #[test]
+    fn manual_unread_preserves_pending_generation_scoped_completion() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut baseline = snapshot(AgentStatus::Idle, 4, 1);
+        let mut other = agent(AgentStatus::Idle, 3);
+        other.pane_id = "other-pane".into();
+        baseline.agents.push(other.clone());
+        presentation.project_snapshot_for_generation(&mut baseline, Some(7));
+        presentation.receive_completions(Some(7), completions(&baseline.boot_id, 2, Some(6)));
+
+        assert!(presentation.mark_unread(&mut baseline, "other-pane"));
+        assert_eq!(baseline.agents[1].agent_status, AgentStatus::Done);
+        assert!(presentation.pending_completions.is_some());
+        let mut settled = snapshot(AgentStatus::Idle, 6, 2);
+        settled.agents.push(other);
+        presentation.project_snapshot_for_generation(&mut settled, Some(7));
+        assert_eq!(settled.agents[0].agent_status, AgentStatus::Done);
+        assert_eq!(settled.agents[1].agent_status, AgentStatus::Done);
+        assert!(presentation.pending_completions.is_none());
+    }
+
+    #[test]
     fn completion_guard_new_boot_baselines_existing_completions() {
         let mut presentation = EndpointAgentPresentation::default();
         let mut old = snapshot(AgentStatus::Working, 1, 1);
@@ -474,5 +565,62 @@ mod tests {
         assert!(!presentation.acknowledge_surface(&mut completed, &surface(1), Some(true)));
         assert!(!presentation.acknowledge_surface(&mut completed, &surface(2), Some(false)));
         assert_eq!(completed.agents[0].agent_status, AgentStatus::Done);
+    }
+
+    #[test]
+    fn visible_sibling_completion_is_unread_until_its_pane_is_focused() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut initial = snapshot(AgentStatus::Working, 4, 1);
+        let mut sibling = agent(AgentStatus::Working, 4);
+        sibling.pane_id = "sibling".into();
+        sibling.focused = false;
+        initial.agents.push(sibling);
+        presentation.project_snapshot(&mut initial);
+        let mut completed = initial;
+        completed.revision = 2;
+        for agent in &mut completed.agents {
+            agent.agent_status = AgentStatus::Idle;
+            agent.state_change_seq = 5;
+        }
+        presentation.project_snapshot(&mut completed);
+        let mut visible = surface(2);
+        let mut sibling_surface = visible.panes[0].clone();
+        sibling_surface.pane_id = "sibling".into();
+        sibling_surface.focused = false;
+        visible.panes.push(sibling_surface);
+
+        assert!(presentation.acknowledge_surface(&mut completed, &visible, Some(true)));
+        assert_eq!(completed.agents[0].agent_status, AgentStatus::Idle);
+        assert_eq!(completed.agents[1].agent_status, AgentStatus::Done);
+
+        completed.focused_pane_id = Some("sibling".into());
+        visible.panes[0].focused = false;
+        visible.panes[1].focused = true;
+        assert!(presentation.acknowledge_surface(&mut completed, &visible, Some(true)));
+        assert_eq!(completed.agents[1].agent_status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn manual_unread_survives_redraw_until_explicit_focus() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut snapshot = snapshot(AgentStatus::Idle, 0, 1);
+        presentation.project_snapshot(&mut snapshot);
+        assert!(presentation.mark_unread(&mut snapshot, "agent-pane"));
+        assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Done);
+        assert!(!presentation.acknowledge_surface(&mut snapshot, &surface(1), Some(true)));
+        assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Done);
+        assert!(presentation.acknowledge_explicit_focus(&mut snapshot, "agent-pane"));
+        assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn returning_to_a_machine_acknowledges_its_focused_manual_unread_pane() {
+        let mut presentation = EndpointAgentPresentation::default();
+        let mut snapshot = snapshot(AgentStatus::Idle, 0, 1);
+        presentation.project_snapshot(&mut snapshot);
+        presentation.mark_unread(&mut snapshot, "agent-pane");
+        presentation.leave_surface();
+        assert!(presentation.acknowledge_surface(&mut snapshot, &surface(1), Some(true)));
+        assert_eq!(snapshot.agents[0].agent_status, AgentStatus::Idle);
     }
 }

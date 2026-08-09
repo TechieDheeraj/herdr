@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -914,6 +914,9 @@ where
 /// Initial resource projection used by the stable client-owned shell.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientShellSnapshot {
+    /// Metrics sampled on this endpoint, never on the attached client.
+    #[serde(default)]
+    pub health: crate::health::HealthSnapshot,
     /// Changes whenever the endpoint process restarts.
     pub boot_id: String,
     /// Monotonic replacement revision within one endpoint boot.
@@ -1416,8 +1419,6 @@ pub enum ServerMessage {
         message: String,
         /// Optional human-readable notification body.
         body: Option<String>,
-        /// Opaque one-time activation capability for a pane-targeted notification.
-        activation_id: Option<u64>,
     },
 
     /// OSC 52 clipboard data forwarded from a PTY through the server.
@@ -2788,6 +2789,16 @@ mod tests {
     #[test]
     fn client_shell_snapshot_roundtrip() {
         let msg = ServerMessage::ClientShellSnapshot(Box::new(ClientShellSnapshot {
+            health: crate::health::HealthSnapshot {
+                cpu_usage_percentage: Some(41),
+                temperature_celsius: Some(52),
+                battery: Some(crate::health::BatteryHealth {
+                    percentage: 80,
+                    charging: None,
+                }),
+                ram: crate::health::ResourceUsage::new(4, 16),
+                disk: None,
+            },
             boot_id: "boot-1".into(),
             revision: 1,
             config_diagnostic: Some("endpoint config warning".into()),
@@ -2905,36 +2916,16 @@ mod tests {
             NotifyKind::Toast,
             NotifyKind::SystemToast,
         ] {
-            let activation_id = (kind == NotifyKind::SystemToast).then_some(42);
             let msg = ServerMessage::Notify {
                 kind,
                 message: "agent done".to_owned(),
                 body: None,
-                activation_id,
             };
             let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
             let (decoded, _): (ServerMessage, _) =
                 bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
             assert_eq!(msg, decoded);
         }
-    }
-
-    #[test]
-    fn notification_activation_roundtrip() {
-        let msg = ClientMessage::NotificationActivated { activation_id: 42 };
-        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-        let (decoded, _): (ClientMessage, _) =
-            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
-        assert_eq!(msg, decoded);
-
-        let msg = ServerMessage::NotificationActivationResolved {
-            activation_id: 42,
-            focused: true,
-        };
-        let encoded = bincode::serde::encode_to_vec(&msg, bincode::config::standard()).unwrap();
-        let (decoded, _): (ServerMessage, _) =
-            bincode::serde::decode_from_slice(&encoded, bincode::config::standard()).unwrap();
-        assert_eq!(msg, decoded);
     }
 
     #[test]

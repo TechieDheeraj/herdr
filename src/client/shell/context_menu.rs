@@ -6,8 +6,13 @@ impl ClientContextMenuOverlay {
 
         let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
+            ClientContextMenuTarget::Agent { .. } => vec![item("Unread", Action::MarkUnread)],
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
-                vec![item("Rename", Action::Rename), item("Close", Action::Close)]
+                vec![
+                    item("Rename", Action::Rename),
+                    item("Close", Action::Close),
+                    item("Color", Action::Color),
+                ]
             }
             ClientContextMenuTarget::Workspace {
                 is_linked_worktree: false,
@@ -18,6 +23,7 @@ impl ClientContextMenuOverlay {
                 item("Close", Action::Close),
                 item("New worktree", Action::NewWorktree),
                 item("Open worktree...", Action::OpenWorktree),
+                item("Color", Action::Color),
             ],
             ClientContextMenuTarget::Workspace {
                 is_linked_worktree: true,
@@ -26,6 +32,7 @@ impl ClientContextMenuOverlay {
                 item("Rename", Action::Rename),
                 item("Close", Action::Close),
                 item("Delete worktree checkout...", Action::RemoveWorktree),
+                item("Color", Action::Color),
             ],
             ClientContextMenuTarget::Workspace {
                 has_worktree_children: true,
@@ -44,11 +51,13 @@ impl ClientContextMenuOverlay {
                     if *collapsed { "Expand" } else { "Collapse" },
                     Action::ToggleGroup,
                 ),
+                item("Color", Action::Color),
             ],
             ClientContextMenuTarget::Tab { .. } => vec![
                 item("New tab", Action::NewTab),
                 item("Rename", Action::Rename),
                 item("Close", Action::Close),
+                item("Color", Action::Color),
             ],
             ClientContextMenuTarget::Pane {
                 source_pane_id,
@@ -84,6 +93,66 @@ impl ClientContextMenuOverlay {
 }
 
 impl ClientShellState {
+    pub(super) fn open_agent_context_menu(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        pane_id: String,
+        x: u16,
+        y: u16,
+    ) {
+        self.overlay = Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Agent {
+                endpoint_id,
+                pane_id,
+            },
+            x,
+            y,
+            highlighted: 0,
+        }));
+    }
+
+    pub(crate) fn mark_agent_unread(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        pane_id: &str,
+    ) -> bool {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        else {
+            return false;
+        };
+        let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
+            return false;
+        };
+        let changed = endpoint.agent_presentation.mark_unread(snapshot, pane_id);
+        if changed && endpoint_id == &self.active_endpoint_id {
+            self.snapshot = endpoint.snapshot.clone();
+        }
+        changed
+    }
+
+    pub(super) fn acknowledge_explicit_agent_focus(&mut self, pane_id: &str) -> bool {
+        let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| endpoint.endpoint_id == self.active_endpoint_id)
+        else {
+            return false;
+        };
+        let Some(snapshot) = endpoint.snapshot.as_deref_mut() else {
+            return false;
+        };
+        let changed = endpoint
+            .agent_presentation
+            .acknowledge_explicit_focus(snapshot, pane_id);
+        if changed {
+            self.snapshot = endpoint.snapshot.clone();
+        }
+        changed
+    }
+
     pub(super) fn open_workspace_context_menu(&mut self, workspace_id: String, x: u16, y: u16) {
         let Some(snapshot) = self.snapshot.as_deref() else {
             return;
@@ -192,6 +261,14 @@ impl ClientShellState {
             return;
         };
         match menu.target {
+            ClientContextMenuTarget::Agent {
+                endpoint_id,
+                pane_id,
+            } => {
+                if action == ClientContextMenuAction::MarkUnread {
+                    self.mark_agent_unread(&endpoint_id, &pane_id);
+                }
+            }
             ClientContextMenuTarget::Workspace {
                 workspace_id,
                 close_group,
@@ -229,6 +306,8 @@ impl ClientShellState {
         use crate::input::KeybindAction;
 
         match action {
+            ClientContextMenuAction::Color => self
+                .open_row_color_picker(super::row_colors::RowColorTarget::Workspace(workspace_id)),
             ClientContextMenuAction::Rename => {
                 let label = self
                     .snapshot
@@ -287,6 +366,11 @@ impl ClientShellState {
         outcome: &mut ClientShellInput,
     ) {
         use crate::api::schema::{Method, TabTarget};
+
+        if action == ClientContextMenuAction::Color {
+            self.open_row_color_picker(super::row_colors::RowColorTarget::Tab(tab_id));
+            return;
+        }
 
         self.push_endpoint_method(
             Method::TabFocus(TabTarget {

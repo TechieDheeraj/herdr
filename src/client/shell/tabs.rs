@@ -12,6 +12,8 @@ pub(crate) fn render_tab_bar(
     tab_scroll: &mut usize,
     reveal_focused_tab: &mut bool,
     tab_drag_insert_index: Option<usize>,
+    tab_colors: &super::super::row_colors::EndpointRowColors,
+    endpoint_id: &ClientEndpointId,
     hits: &mut ShellHitMap,
 ) {
     let palette = &config.palette;
@@ -123,6 +125,10 @@ pub(crate) fn render_tab_bar(
             right_padding = padding.saturating_sub(left) as usize,
         );
         put_text(buffer, rect.x, rect.y, rect.width, &text, style);
+        if let Some(color) = super::super::row_colors::lookup(tab_colors, endpoint_id, &tab.tab_id)
+        {
+            super::super::row_colors::apply_contrast(buffer, rect, color);
+        }
         hits.tabs.push((rect, tab.tab_id.clone()));
         first_visible.get_or_insert(index);
         last_visible = Some(index);

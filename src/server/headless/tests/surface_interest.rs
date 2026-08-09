@@ -270,7 +270,8 @@ async fn background_surface_activation_preserves_focused_viewer_geometry() {
         focused: true,
     }));
     let focused_size = server.app.state.workspaces[0].test_runtimes[&pane_id].current_size();
-    assert_eq!(focused_size, (17, 67));
+    // The default pane frame consumes two rows/columns, plus the scrollbar.
+    assert_eq!(focused_size, (15, 65));
     let shared_tab_id = server.shell_tab_id_for_client(7).expect("focused tab");
     assert_eq!(
         server.tab_geometry_controllers.get(&shared_tab_id),
@@ -367,7 +368,7 @@ async fn focused_surface_reassertion_reclaims_tab_geometry() {
     assert!(server.claim_shell_tab_geometry(7, false));
     assert_eq!(
         server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
-        (17, 67)
+        (15, 65)
     );
 
     request_active_surface(&mut server, 8, "reassert-focused-surface");
@@ -378,7 +379,7 @@ async fn focused_surface_reassertion_reclaims_tab_geometry() {
     assert_eq!(server.clients[&8].outer_terminal_focus, Some(true));
     assert_eq!(
         server.app.state.workspaces[0].test_runtimes[&pane_id].current_size(),
-        (35, 99)
+        (33, 97)
     );
     assert_eq!(
         server.tab_geometry_controllers.get(&shared_tab_id),

@@ -554,7 +554,10 @@ fn restore_tab(
                     .into(),
             );
             let auto_name_number = auto_pane_numbers.get(id).copied().unwrap_or(1);
-            panes.insert(*id, PaneState::new(terminal.id.clone()).with_auto_name_number(auto_name_number));
+            panes.insert(
+                *id,
+                PaneState::new(terminal.id.clone()).with_auto_name_number(auto_name_number),
+            );
             terminals.push(terminal);
             continue;
         }
@@ -790,7 +793,10 @@ fn restore_tab(
                         format!("Could not start the saved shell: {e}. Fix the shell configuration and restart this session."),
                     );
                     let auto_name_number = auto_pane_numbers.get(id).copied().unwrap_or(1);
-                    panes.insert(*id, PaneState::new(terminal.id.clone()).with_auto_name_number(auto_name_number));
+                    panes.insert(
+                        *id,
+                        PaneState::new(terminal.id.clone()).with_auto_name_number(auto_name_number),
+                    );
                     terminals.push(terminal);
                 }
             }
@@ -1473,6 +1479,13 @@ mod tests {
             for workspace in &mut snapshot.workspaces {
                 workspace.identity_cwd = cwd.clone();
                 for tab in &mut workspace.tabs {
+                    tab.auto_pane_numbers = tab
+                        .panes
+                        .keys()
+                        .enumerate()
+                        .map(|(index, id)| (*id, index + 3))
+                        .collect();
+                    tab.next_auto_pane_number = tab.panes.len() + 3;
                     for pane in tab.panes.values_mut() {
                         pane.cwd = cwd.clone();
                     }
@@ -1515,6 +1528,26 @@ mod tests {
             );
             let runtimes = crate::terminal::TerminalRuntimeRegistry::from(runtimes);
             let captured = crate::persist::capture(&workspaces, &terminals, &runtimes, Some(0), 0);
+            for (restored_workspace, saved_workspace) in workspaces.iter().zip(&snapshot.workspaces)
+            {
+                for (restored_tab, saved_tab) in
+                    restored_workspace.tabs.iter().zip(&saved_workspace.tabs)
+                {
+                    let mut restored_numbers: Vec<_> = restored_tab
+                        .panes
+                        .values()
+                        .map(|pane| pane.auto_name_number)
+                        .collect();
+                    let mut saved_numbers: Vec<_> =
+                        saved_tab.auto_pane_numbers.values().copied().collect();
+                    restored_numbers.sort_unstable();
+                    saved_numbers.sort_unstable();
+                    assert_eq!(
+                        restored_numbers, saved_numbers,
+                        "unavailable panes must retain their automatic numbers"
+                    );
+                }
+            }
             assert_eq!(
                 captured.workspaces.len(),
                 2,

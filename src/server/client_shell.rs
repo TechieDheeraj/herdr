@@ -140,7 +140,7 @@ pub(super) fn snapshot_with_completions(
                 pane_id,
                 workspace_id: pane.workspace_id,
                 tab_id: pane.tab_id,
-                label: pane.label,
+                label: pane.display_label.or(pane.label),
                 cwd: pane.cwd,
                 foreground_cwd: pane.foreground_cwd,
                 focused,
@@ -240,6 +240,7 @@ pub(super) fn snapshot_with_completions(
             });
 
     let shell = protocol::ClientShellSnapshot {
+        health: app.state.health,
         boot_id: boot_id.to_owned(),
         revision,
         config_diagnostic: config_diagnostic.map(str::to_owned),
@@ -728,6 +729,12 @@ mod tests {
             crate::api::EventHub::default(),
         );
         app.state.integration_recommendations.clear();
+        app.state.health = crate::health::HealthSnapshot {
+            cpu_usage_percentage: Some(35),
+            temperature_celsius: Some(47),
+            ram: crate::health::ResourceUsage::new(4, 16),
+            ..Default::default()
+        };
         app.state.update_available = Some("0.8.3".into());
         app.state.update_install_command = "herdr update".into();
         app.state.latest_release_notes_available = true;
@@ -739,6 +746,7 @@ mod tests {
 
         let snapshot = snapshot(&app, "boot", 7, None, None);
 
+        assert_eq!(snapshot.health, app.state.health);
         assert_eq!(snapshot.update_available.as_deref(), Some("0.8.3"));
         assert_eq!(snapshot.update_install_command, "herdr update");
         assert!(snapshot.latest_release_notes_available);

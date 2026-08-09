@@ -209,6 +209,33 @@ impl Tab {
         self.custom_name = Some(name);
     }
 
+    pub(super) fn allocate_auto_pane_number(&mut self) -> usize {
+        let high_water = self.next_auto_pane_number.max(1);
+        let used = self
+            .panes
+            .values()
+            .map(|pane| pane.auto_name_number)
+            .collect::<HashSet<_>>();
+        if let Some(number) = (1..high_water).find(|number| !used.contains(number)) {
+            return number;
+        }
+
+        self.next_auto_pane_number = high_water.saturating_add(1);
+        high_water
+    }
+
+    pub fn auto_pane_label(&self, pane_id: PaneId) -> Option<String> {
+        self.panes.get(&pane_id).map(PaneState::auto_name)
+    }
+
+    /// Config-independent display name used by APIs and the Agents panel.
+    pub fn pane_display_label(&self, pane_id: PaneId, terminal: &TerminalState) -> Option<String> {
+        terminal
+            .effective_title()
+            .or_else(|| terminal.manual_label.clone())
+            .or_else(|| self.auto_pane_label(pane_id))
+    }
+
     pub fn split_focused_command(
         &mut self,
         direction: Direction,

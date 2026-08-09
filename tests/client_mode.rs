@@ -1064,6 +1064,20 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         &["client"],
         &[("PATH", &path)],
     );
+    // This lifecycle test clicks both machine lists without scrolling. Preserve
+    // the original 24-row sidebar capacity above the six-row Health Check panel.
+    const CLIENT_ROWS: u16 = 30;
+    client
+        ._master
+        .as_ref()
+        .unwrap()
+        .resize(PtySize {
+            rows: CLIENT_ROWS,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .unwrap();
     let output = spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
     let screen_text = || {
         let bytes = output
@@ -1071,7 +1085,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
             .unwrap_or_else(|p| p.into_inner())
             .bytes
             .clone();
-        terminal_screen::text(&bytes, 80, 24)
+        terminal_screen::text(&bytes, 80, CLIENT_ROWS)
     };
     assert!(
         wait_until(REMOTE_READY_TIMEOUT, Duration::from_millis(20), || {

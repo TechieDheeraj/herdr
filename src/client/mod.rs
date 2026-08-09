@@ -30,6 +30,7 @@ mod handshake;
 mod image_files;
 mod input;
 mod loop_config;
+mod notification_activation;
 mod notifications;
 mod shell;
 mod shell_runtime;
@@ -491,6 +492,7 @@ async fn run_client_loop(
         deferred_local_activation: None,
         draw_host_cursor,
         detached_process_children: Vec::new(),
+        notification_activations: Default::default(),
         shell: config.shell_config.map(shell::ClientShellState::new),
     };
     let mut federated = endpoint_catalog.has_enabled_ssh();
@@ -531,6 +533,9 @@ async fn run_client_loop(
 
     // Channel for events from the resize and server reader threads.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
+    if state.shell.is_some() {
+        state.notification_activations.start(event_tx.clone());
+    }
     let (supervisor_tx, mut supervisor_rx) =
         tokio::sync::mpsc::channel::<endpoint::EndpointSupervisorEvent>(64);
     // Keep Windows console draining independent of server-frame backpressure.
@@ -540,28 +545,6 @@ async fn run_client_loop(
     let stdin_tx = event_tx.clone();
 
     let mut endpoint_commands = endpoint_commands::EndpointCommands::default();
-
-    #[cfg(target_os = "macos")]
-    let (notification_activation_tx, notification_activation_rx) =
-        std::sync::mpsc::channel::<u64>();
-    #[cfg(target_os = "macos")]
-    let notification_activation_endpoint = if state.attach_escape.is_none() {
-        match crate::platform::NotificationActivationEndpoint::start(move |activation_id| {
-            let _ = notification_activation_tx.send(activation_id);
-        }) {
-            Ok(endpoint) => Some(endpoint),
-            Err(err) => {
-                warn!(err = %err, "desktop notification activation endpoint unavailable");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    #[cfg(target_os = "macos")]
-    let mut awaiting_notification_activations = VecDeque::new();
-    #[cfg(target_os = "macos")]
-    let mut activate_terminal_after_render = None;
 
     // Spawn the stdin reader thread.
     let will_query_host_terminal_theme = state.attach_escape.is_none();
@@ -867,6 +850,31 @@ async fn run_client_loop(
             ClientLoopEvent::HostPower(event) => {
                 if supervisors.host_power_event(event, now) {
                     write_stream.resume_health(now);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            ClientLoopEvent::NotificationActivated(activation_id) => {
+                let outcome = state.shell.as_mut().and_then(|shell| {
+                    state
+                        .notification_activations
+                        .activate(activation_id, shell, now)
+                });
+                if let Some(outcome) = outcome {
+                    let frame = state.shell.as_mut().and_then(|shell| {
+                        shell.compose(state.reported_size.0, state.reported_size.1)
+                    });
+                    if finish_client_shell_input(
+                        &mut state,
+                        outcome,
+                        frame,
+                        &mut write_stream,
+                        &mut pending_activation,
+                        &mut endpoint_commands,
+                        &mut prefix_input_source,
+                        &mut scheduled_activation,
+                    )? {
+                        return Ok(());
+                    }
                 }
             }
             ClientLoopEvent::EndpointCatalog(reload) => pending_catalog = Some(reload),
@@ -1864,6 +1872,8 @@ async fn run_client_loop(
                                 &state.sound_config,
                                 #[cfg(windows)]
                                 &event_tx,
+                                #[cfg(not(windows))]
+                                &mut state.notification_activations,
                             );
                             if let Some(frame) = frame {
                                 state.present_frame(frame);
@@ -2113,6 +2123,26 @@ async fn run_client_loop(
                         }
                     }
                     ServerMessage::EndpointControl { kind, data } => {
+                        if kind == crate::protocol::endpoint::AGENT_UNREAD_KIND {
+                            if let Ok(request) = serde_json::from_str::<
+                                crate::protocol::endpoint::AgentUnread,
+                            >(&data)
+                            {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    if shell.endpoint_boot_id(&endpoint_id)
+                                        == Some(request.boot_id.as_str())
+                                        && shell.mark_agent_unread(&endpoint_id, &request.pane_id)
+                                    {
+                                        if let Some(frame) = shell
+                                            .compose(state.reported_size.0, state.reported_size.1)
+                                        {
+                                            state.present_frame(frame);
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         if kind == crate::protocol::endpoint::PRESENTATION_EFFECTS_READY_KIND {
                             let progress = pending_activation.as_mut().map(|activation| {
                                 activation.receive_presentation_effects_ready(
@@ -2355,6 +2385,11 @@ async fn run_client_loop(
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
+                        let drag_outcome = shell.tick_pane_drag(now);
+                        outcome.repaint |= drag_outcome.repaint;
+                        outcome.resize |= drag_outcome.resize;
+                        outcome.actions.extend(drag_outcome.actions);
+                        outcome.requests.extend(drag_outcome.requests);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id) {
                                 continue;
@@ -2383,6 +2418,8 @@ async fn run_client_loop(
                         &state.sound_config,
                         #[cfg(windows)]
                         &event_tx,
+                        #[cfg(not(windows))]
+                        &mut state.notification_activations,
                     );
                     if finish_client_shell_input(
                         &mut state,

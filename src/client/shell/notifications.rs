@@ -337,6 +337,7 @@ mod tests {
         config.toast_delay_seconds = 0;
         let mut state = ClientShellState::new(config);
         let mut snapshot = super::super::tests::snapshot();
+        snapshot.focused_pane_id = Some("other-focused-pane".into());
         snapshot.agents.push(crate::protocol::ClientShellAgent {
             pane_id: "pane_1".into(),
             workspace_id: "ws_1".into(),

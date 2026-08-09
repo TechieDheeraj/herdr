@@ -254,6 +254,24 @@ mod tests {
             actual.remove("pane.link.resolve").as_deref(),
             Some("f5e4a3e01453ae7b188f127ce951c12c20e0bebcc17cc364eeb6d1a01fd5bf81")
         );
+        // Custom additive methods are negotiated by name. Keep the generation-1
+        // fixture untouched and freeze their parameter shapes independently.
+        for (method, digest) in [
+            (
+                "agent.mark_unread",
+                "322d037b185cd8ce1fa8aebf21bb5792a1462cb96335753052cc060de5b06a22",
+            ),
+            (
+                "layout.export",
+                "bceee5929adabcfe9e9bee91335b9fecc11a4dfbba046f546473ddf16e0873ce",
+            ),
+            (
+                "pane.move",
+                "8b5b2e4f2444dc127afe3f22cf30b7927c0d34a8ac1f138ecb564dd70d422a0e",
+            ),
+        ] {
+            assert_eq!(actual.remove(method).as_deref(), Some(digest), "{method}");
+        }
 
         assert_eq!(
             actual, expected,

@@ -967,7 +967,7 @@
         {
           "key": "ui.pane_borders",
           "type": "enum",
-          "default": "\"auto\"",
+          "default": "\"always\"",
           "description": "Draw borders around split panes. auto draws them only for split panes, always also frames a lone pane (only while pane_outer_borders is enabled, since every edge of a lone pane is an outer edge), off disables them. Legacy booleans still parse: true maps to auto and false maps to off.",
           "values": [
             "auto",

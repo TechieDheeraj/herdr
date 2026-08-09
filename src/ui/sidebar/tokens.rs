@@ -33,6 +33,7 @@ impl ResolvedTokenKind {
             | Self::Workspace(value)
             | Self::Tab(value)
             | Self::Pane(value)
+            | Self::Directory(value)
             | Self::Agent(value)
             | Self::TerminalTitle(value)
             | Self::Branch(value)
@@ -58,6 +59,7 @@ pub(crate) struct AgentTokenContext<'a> {
     pub(crate) workspace: &'a str,
     pub(crate) tab: Option<&'a str>,
     pub(crate) pane: Option<&'a str>,
+    pub(crate) directory: Option<&'a str>,
     pub(crate) agent_label: Option<&'a str>,
     pub(crate) terminal_title: Option<&'a str>,
     pub(crate) terminal_title_stripped: Option<&'a str>,
@@ -95,6 +97,13 @@ pub(crate) fn agent_rows(
                         AgentSidebarToken::Pane => context
                             .pane
                             .map(|value| ResolvedTokenKind::Pane(value.to_string())),
+                        AgentSidebarToken::PaneOrTab => context
+                            .pane
+                            .or(context.tab)
+                            .map(|value| ResolvedTokenKind::Pane(value.to_string())),
+                        AgentSidebarToken::Directory => context
+                            .directory
+                            .map(|value| ResolvedTokenKind::Directory(value.to_string())),
                         AgentSidebarToken::Agent => context
                             .agent_label
                             .map(|value| ResolvedTokenKind::Agent(value.to_string())),
@@ -197,6 +206,7 @@ mod tests {
         workspace: String,
         tab: Option<String>,
         pane: Option<String>,
+        directory: Option<String>,
         agent_label: Option<String>,
         terminal_title: Option<String>,
         terminal_title_stripped: Option<String>,
@@ -209,6 +219,7 @@ mod tests {
             workspace: "repo".into(),
             tab: None,
             pane: None,
+            directory: None,
             agent_label: Some("pi".into()),
             terminal_title: None,
             terminal_title_stripped: None,
@@ -223,6 +234,7 @@ mod tests {
             workspace: &entry.workspace,
             tab: entry.tab.as_deref(),
             pane: entry.pane.as_deref(),
+            directory: entry.directory.as_deref(),
             agent_label: entry.agent_label.as_deref(),
             terminal_title: entry.terminal_title.as_deref(),
             terminal_title_stripped: entry.terminal_title_stripped.as_deref(),
@@ -403,10 +415,12 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
     #[test]
     fn default_rows_show_tab_and_directory_while_pane_or_tab_remains_available() {
         let mut entry = entry();
+        entry.tab = Some("1".into());
+        entry.directory = Some("src".into());
         let config = AgentsSidebarConfig::default();
 
         assert_eq!(
-            agent_rows(&config, &entry, "working"),
+            agent_rows(&config, context(&entry), "working"),
             vec![
                 vec![
                     ResolvedToken::unstyled(ResolvedTokenKind::StateIcon),
@@ -425,16 +439,15 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
             ..Default::default()
         };
         assert_eq!(
-            agent_rows(&fallback_config, &entry, "working"),
+            agent_rows(&fallback_config, context(&entry), "working"),
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Pane(
                 "1".into()
             ))]]
         );
 
-        entry.pane_label = Some("tests".into());
-        entry.pane_or_tab_label = "tests".into();
+        entry.pane = Some("tests".into());
         assert_eq!(
-            agent_rows(&fallback_config, &entry, "working")[0][0],
+            agent_rows(&fallback_config, context(&entry), "working")[0][0],
             ResolvedToken::unstyled(ResolvedTokenKind::Pane("tests".into()))
         );
     }
@@ -445,6 +458,26 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
         let agent = ResolvedToken::unstyled(ResolvedTokenKind::Agent("codex".into()));
 
         assert_eq!(separator(&directory, &agent), " · ");
+    }
+
+    #[test]
+    fn custom_context_tokens_respect_conditional_hiding() {
+        let config: AgentsSidebarConfig = toml::from_str(
+            r##"rows = [[{ token = "directory", rules = [{ equals = "src", hide = true }] }, { token = "pane_or_tab", rules = [{ equals = "tests", hide = true }] }, "agent"]]"##,
+        )
+        .unwrap();
+        let mut entry = entry();
+        entry.directory = Some("src".into());
+        entry.pane = Some("tests".into());
+        assert_eq!(
+            agent_rows(&config, context(&entry), "working"),
+            vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
+                "pi".into()
+            ))]]
+        );
+        entry.directory = Some("other".into());
+        entry.pane = Some("build".into());
+        assert_eq!(agent_rows(&config, context(&entry), "working")[0].len(), 3);
     }
 
     #[test]

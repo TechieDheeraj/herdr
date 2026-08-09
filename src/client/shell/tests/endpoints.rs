@@ -1364,7 +1364,9 @@ fn expanded_machine_sidebar_applies_space_row_gap_within_each_machine() {
     );
 
     state.workspace_scroll = usize::MAX;
-    state.compose(100, 18).expect("scrolled endpoint frame");
+    // Keep the three remote rows and their gap visible together, including
+    // Health Check's six rows and the trailing workspace-creation blank row.
+    state.compose(100, 26).expect("scrolled endpoint frame");
     let metrics = state
         .hits
         .workspace_scroll_metrics
@@ -2127,7 +2129,7 @@ fn machine_arrow_toggles_inactive_machine_without_switching() {
             state.sidebar_collapsed = sidebar_collapsed;
 
             for collapsed in [true, false] {
-                let frame = state.compose(100, 28).expect("three machine frame");
+                let frame = state.compose(100, 36).expect("three machine frame");
                 let machine = state
                     .hits
                     .machines
@@ -2169,7 +2171,7 @@ fn machine_arrow_toggles_inactive_machine_without_switching() {
                 assert!(!state.collapsed_endpoints.contains(&other_id));
                 assert!(state.endpoint_error.is_none());
 
-                state.compose(100, 28).expect("toggled machine frame");
+                state.compose(100, 36).expect("toggled machine frame");
                 assert_eq!(
                     state
                         .hits

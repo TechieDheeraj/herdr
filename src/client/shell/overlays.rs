@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "row_color_overlay.rs"]
+mod row_color_overlay;
 mod settings_overlay;
 mod worktree_overlays;
 
@@ -10,6 +12,7 @@ pub(crate) struct OverlayRender {
     pub(crate) primary: Rect,
     pub(crate) clear: Rect,
     pub(crate) cancel: Rect,
+    pub(crate) color_swatches: Vec<Rect>,
     pub(crate) navigator_popup: Rect,
     pub(crate) navigator_search: Rect,
     pub(crate) navigator_rows: Vec<(Rect, ClientNavigatorTarget)>,
@@ -56,6 +59,9 @@ pub(crate) fn render_client_overlay(
         }
     }
     match o {
+        ClientShellOverlay::RowColor(picker) => {
+            row_color_overlay::render_row_color_overlay(b, picker, p)
+        }
         ClientShellOverlay::Onboarding => render_onboarding_overlay(b, k, p),
         ClientShellOverlay::ProductAnnouncement(v) => render_product_announcement_overlay(b, v, p),
         ClientShellOverlay::ReleaseNotes(v) => {

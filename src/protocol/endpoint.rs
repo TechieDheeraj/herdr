@@ -39,6 +39,16 @@ pub struct EndpointAgentCompletions {
     pub completions: std::collections::BTreeMap<String, u64>,
 }
 
+pub const AGENT_UNREAD_KIND: &str = "agent.unread.v1";
+
+/// Optional acknowledgement request emitted by the public agent.mark_unread API.
+/// Each attached client applies it to its own unread presentation state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUnread {
+    pub boot_id: String,
+    pub pane_id: String,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -224,6 +234,7 @@ mod tests {
 
     fn snapshot() -> ClientShellSnapshot {
         ClientShellSnapshot {
+            health: crate::health::HealthSnapshot::default(),
             boot_id: "boot".into(),
             revision: 1,
             config_diagnostic: None,
@@ -288,6 +299,7 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(snapshot.boot_id, "boot-v1");
+        assert_eq!(snapshot.health, crate::health::HealthSnapshot::default());
         assert_eq!(
             snapshot.workspaces[0].agent_status,
             crate::api::schema::AgentStatus::Unknown

@@ -10,7 +10,7 @@ impl ClientShellState {
             self.config.sidebar_min_width,
             self.config.sidebar_max_width,
         )
-        .unwrap_or((18, 36));
+        .unwrap_or((18, 80));
         let width = column.saturating_add(1).clamp(min, max);
         if self.sidebar_width != width {
             self.sidebar_width = width;
@@ -22,7 +22,9 @@ impl ClientShellState {
     }
 
     fn set_sidebar_section_from_row(&mut self, row: u16, outcome: &mut ClientShellInput) {
-        let divider = self.hits.sidebar_divider;
+        let mut divider = self.hits.sidebar_divider;
+        divider.width = 2;
+        let divider = super::health_check::primary_area(divider, self.sidebar_health_split);
         if divider.height == 0 {
             return;
         }
@@ -693,6 +695,16 @@ impl ClientShellState {
             self.navigate_workspace_id = None;
             outcome.repaint = true;
         }
+        if self.handle_pane_drag_mouse(mouse, outcome) {
+            return;
+        }
+        if self.overlay.is_none()
+            && self.chrome_drag.is_none()
+            && self.pane_mouse_gesture.is_none()
+            && self.handle_workspace_blank_click(mouse, outcome)
+        {
+            return;
+        }
         if matches!(self.overlay, Some(ClientShellOverlay::Onboarding)) {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && super::contains(self.hits.overlay_primary, point)
@@ -1030,6 +1042,10 @@ impl ClientShellState {
                     self.set_sidebar_section_from_row(mouse.row, outcome);
                     return;
                 }
+                Some(ClientChromeDrag::SidebarHealth) => {
+                    self.set_sidebar_health_from_row(mouse.row, outcome);
+                    return;
+                }
                 Some(ClientChromeDrag::WorkspaceScrollbar { grab_row_offset }) => {
                     if let Some(metrics) = self.hits.workspace_scroll_metrics {
                         let offset = crate::ui::scrollbar_offset_from_drag_row(
@@ -1357,7 +1373,9 @@ impl ClientShellState {
                             );
                         }
                     }
-                    ClientChromeDrag::SidebarWidth | ClientChromeDrag::SidebarSection => {
+                    ClientChromeDrag::SidebarWidth
+                    | ClientChromeDrag::SidebarSection
+                    | ClientChromeDrag::SidebarHealth => {
                         self.persist_chrome_preferences(outcome);
                     }
                     ClientChromeDrag::WorkspaceScrollbar { .. }
@@ -1382,6 +1400,9 @@ impl ClientShellState {
                 );
                 return;
             }
+        }
+        if self.row_color_mouse(mouse, outcome) {
+            return;
         }
         if matches!(self.overlay, Some(ClientShellOverlay::GlobalMenu(_))) {
             let row_hit = self
@@ -1835,6 +1856,33 @@ impl ClientShellState {
                 if !self.config.mouse_capture {
                     return;
                 }
+                if let Some((_, endpoint_id, pane_id)) = self
+                    .hits
+                    .endpoint_agents
+                    .iter()
+                    .find(|(rect, _, _)| super::contains(*rect, point))
+                    .cloned()
+                {
+                    self.open_agent_context_menu(endpoint_id, pane_id, mouse.column, mouse.row);
+                    outcome.repaint = true;
+                    return;
+                }
+                if let Some((_, pane_id)) = self
+                    .hits
+                    .agents
+                    .iter()
+                    .find(|(rect, _)| super::contains(*rect, point))
+                    .cloned()
+                {
+                    self.open_agent_context_menu(
+                        self.active_endpoint_id.clone(),
+                        pane_id,
+                        mouse.column,
+                        mouse.row,
+                    );
+                    outcome.repaint = true;
+                    return;
+                }
                 let workspace_id = (!self.sidebar_collapsed)
                     .then(|| self.active_endpoint_workspace_at(point))
                     .flatten();
@@ -1972,6 +2020,11 @@ impl ClientShellState {
                 if super::contains(self.hits.sidebar_section_divider, point) {
                     self.chrome_drag = Some(ClientChromeDrag::SidebarSection);
                     self.set_sidebar_section_from_row(mouse.row, outcome);
+                    return;
+                }
+                if super::contains(self.hits.sidebar_health_divider, point) {
+                    self.chrome_drag = Some(ClientChromeDrag::SidebarHealth);
+                    self.set_sidebar_health_from_row(mouse.row, outcome);
                     return;
                 }
                 if super::contains(self.hits.workspace_scrollbar, point) {

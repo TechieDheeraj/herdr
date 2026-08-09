@@ -53,6 +53,7 @@ pub(super) fn handle_shell_notification_effects(
     effects: Vec<shell::ClientShellNotificationEffect>,
     sound_config: &crate::config::SoundConfig,
     #[cfg(windows)] event_tx: &tokio::sync::mpsc::Sender<super::events::ClientLoopEvent>,
+    #[cfg(not(windows))] activations: &mut super::notification_activation::NotificationActivations,
 ) {
     for effect in effects {
         match effect {
@@ -71,13 +72,12 @@ pub(super) fn handle_shell_notification_effects(
             shell::ClientShellNotificationEffect::System {
                 title,
                 body,
-                #[cfg(windows)]
                 target,
             } => {
                 #[cfg(windows)]
                 let result = show_system_notification(&title, body.as_deref(), target, event_tx);
                 #[cfg(not(windows))]
-                let result = crate::platform::show_desktop_notification(&title, body.as_deref());
+                let result = activations.show(&title, body.as_deref(), target);
                 if let Err(err) = result {
                     warn!(err = %err, "failed to emit system notification");
                 }

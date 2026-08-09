@@ -49,22 +49,6 @@ impl SidebarRowColor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SidebarColorTarget {
-    Workspace { workspace_id: String },
-    Tab { tab_id: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SidebarColorPickerState {
-    pub(crate) target: SidebarColorTarget,
-    pub(crate) target_label: String,
-    pub(crate) input: String,
-    pub(crate) replace_on_type: bool,
-    pub(crate) selected_preset: usize,
-    pub(crate) error: Option<String>,
-}
-
 pub(crate) const SIDEBAR_COLOR_PRESETS: [(&str, SidebarRowColor); 12] = [
     ("red", SidebarRowColor::new(0xF3, 0x8B, 0xA8)),
     ("orange", SidebarRowColor::new(0xFA, 0xB3, 0x87)),

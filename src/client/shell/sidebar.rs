@@ -211,10 +211,11 @@ pub(crate) fn render_sidebar(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
+    let primary_area = super::super::health_check::primary_area(area, state.sidebar_health_split);
     let (workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
+        crate::ui::expanded_sidebar_sections(primary_area, state.sidebar_section_split);
     hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+        crate::ui::sidebar_section_divider_rect(primary_area, state.sidebar_section_split);
     put_text(
         buffer,
         workspace_area.x,
@@ -236,7 +237,7 @@ pub(crate) fn render_sidebar(
             .saturating_sub(WORKSPACE_HEADER_ROWS + 1),
     );
     hits.workspace_body = body;
-    let row_heights = entries
+    let mut row_heights = entries
         .iter()
         .map(|entry| {
             snapshot
@@ -256,7 +257,7 @@ pub(crate) fn render_sidebar(
                 .unwrap_or(1)
         })
         .collect::<Vec<_>>();
-    let gaps = entries
+    let mut gaps = entries
         .iter()
         .enumerate()
         .map(|(index, _)| {
@@ -265,6 +266,8 @@ pub(crate) fn render_sidebar(
                 .map_or(0, |next| u16::from(!next.indented) * config.spaces.row_gap)
         })
         .collect::<Vec<_>>();
+    row_heights.push(1);
+    gaps.push(0);
     let mut metrics = super::scroll::list_scroll_metrics(
         &row_heights,
         &gaps,
@@ -342,6 +345,13 @@ pub(crate) fn render_sidebar(
             state.collapsed_groups,
             palette,
         );
+        if let Some(color) = super::super::row_colors::lookup(
+            state.workspace_colors,
+            state.active_endpoint_id,
+            &workspace.workspace_id,
+        ) {
+            super::super::row_colors::apply_contrast(buffer, rect, color);
+        }
         hits.workspaces.push(WorkspaceHit {
             rect,
             endpoint_id: ClientEndpointId::Local,
@@ -436,6 +446,15 @@ pub(crate) fn render_sidebar(
         snapshot,
         config,
         state.agent_scroll,
+        hits,
+    );
+
+    super::super::health_check::render(
+        buffer,
+        area,
+        Some(snapshot),
+        state.sidebar_health_split,
+        palette,
         hits,
     );
 

@@ -307,7 +307,7 @@ fn ping_over_socket_returns_version() {
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
     // Intentionally hardcoded so wire protocol bumps require updating this test.
     // Changing this value means old clients/servers are no longer compatible.
-    assert_eq!(value["result"]["protocol"], 22);
+    assert_eq!(value["result"]["protocol"], 23);
 
     cleanup_spawned_herdr(child, base);
 }
@@ -2335,7 +2335,10 @@ fn events_subscribe_streams_output_and_agent_status_events() {
 
     let panes = send_request(
         &socket_path,
-        r#"{"id":"req_21","method":"pane.list","params":{}}"#,
+        &format!(
+            r#"{{"id":"req_21","method":"pane.list","params":{{"workspace_id":"{}"}}}}"#,
+            workspace_id
+        ),
     );
     let pane_id = panes["result"]["panes"][0]["pane_id"]
         .as_str()
@@ -2372,7 +2375,16 @@ fn events_subscribe_streams_output_and_agent_status_events() {
     );
     assert_eq!(send_enter["result"]["type"], "ok");
 
-    let output_event = reader.read_json_line(Duration::from_secs(3));
+    let output_event = reader.try_read_json_line(Duration::from_secs(3)).unwrap_or_else(|| {
+        let pane = send_request(
+            &socket_path,
+            &format!(
+                r#"{{"id":"output_timeout","method":"pane.read","params":{{"pane_id":"{}","source":"recent_unwrapped","lines":40}}}}"#,
+                legacy_pane_id
+            ),
+        );
+        panic!("timed out waiting for pane.output_matched; pane contents: {pane}");
+    });
     assert_eq!(output_event["event"], "pane.output_matched");
     assert_eq!(output_event["data"]["pane_id"], pane_id);
     assert_eq!(output_event["data"]["read"]["pane_id"], pane_id);

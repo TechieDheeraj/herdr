@@ -263,15 +263,6 @@ This is a hotfix release for v0.9.2. See the v0.9.2 notes for the full feature r
 - Navigate-mode selection rows now use a dedicated per-theme cursor color, customizable via `theme.custom.selection_bg`, so the cursor stays distinguishable from the active Space and Agent highlight.
 - Copy mode now supports `B`, `E`, and `W` motions over whitespace-delimited big words. (#2270, thanks @jplew)
 - The plugin marketplace now discovers valid manifests at repository roots and subdirectories, groups multiple plugins under each repository, and publishes their versions and exact default-branch commits.
-- Added persistent tab-local `pane N` names that reuse the lowest available number, plus pane-title drag-and-drop: center drops swap panes in the same tab, edge drops place panes left/right/above/below, and hovering a tab or workspace switches the destination before the move.
-- Added an **Unread** action to Agent sidebar row menus and an `agent.mark_unread` socket method for manually returning an idle agent to `done`.
-- Added a resizable expanded-sidebar Health Check section with server-host CPU, battery, RAM, and disk usage.
-- Added workspace creation by double-clicking empty space in the expanded Spaces list, including a reachable trailing empty row after scrolling to the bottom.
-- Added right-click color customization for complete Space sidebar rows and top tabs, with 12 preset colors, strict `#RGB`/`#RRGGBB` input, automatic readable text contrast, and a clear action.
-
-### Changed
-- Agent sidebar entries now show the workspace, tab, and optional pane name, followed by the agent launch directory and agent name.
-- Increased the default maximum expanded sidebar width from 36 to 80 columns so longer Agent and Space details can remain visible.
 
 ### Changed
 - Windows support is now generally available through stable releases and uses the stable update channel by default. Existing preview installs stay on preview until explicitly switched.
@@ -341,10 +332,7 @@ This is a hotfix release for v0.9.2. See the v0.9.2 notes for the full feature r
 - OSC 4 palette overrides now render with the requested color instead of forwarding the palette index. (#2162, thanks @hamidi-dev)
 - Host terminal appearance is re-queried when focus returns, keeping automatic light and dark themes current. (#2416, #2417)
 - The bundled and installable Herdr agent skill now matches this stable release's CLI and lifecycle behavior. (#2847)
-- Clicking a pane-targeted macOS completion notification now returns through the originating local client and focuses the exact workspace, tab, and pane, including for remote sessions. Pane-targeted completion notifications no longer use the Script Editor AppleScript fallback.
 - `pane send-keys` and `agent send-keys` now preserve Shift when sending `shift+tab`, allowing agent permission modes to be cycled programmatically. (#1561, thanks @keinstn and @tomohisa)
-- Completed agents now remain unread until their exact pane receives focus; focusing the containing workspace, tab, or a sibling pane no longer clears the marker or suppresses that pane's completion notification.
-- Pane-title drags now autoscroll all the way from an earlier workspace to the final workspace and leave scroll mode so the final workspace can become the drop destination.
 
 ## [0.8.0] - 2026-08-03
 

@@ -239,10 +239,11 @@ impl ClientShellState {
                             }
                         })
                     });
+                    #[cfg(not(windows))]
+                    let target = self.notification_target(&pending.endpoint_id, &pending.event);
                     effects.push(ClientShellNotificationEffect::System {
                         title: pending.event.title,
                         body: pending.event.body,
-                        #[cfg(windows)]
                         target,
                     });
                 }
@@ -308,6 +309,9 @@ impl ClientShellState {
         else {
             return false;
         };
+        if let Some(pane_id) = event.pane_id.as_deref() {
+            return snapshot.focused_pane_id.as_deref() == Some(pane_id);
+        }
         if let Some(tab_id) = event.tab_id.as_deref() {
             return snapshot.focused_tab_id.as_deref() == Some(tab_id);
         }

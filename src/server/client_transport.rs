@@ -294,19 +294,6 @@ impl ClientRenderWriter {
     pub(crate) fn send_ordered(&self, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
         self.queue.send_ordered(data)
     }
-
-    /// Discard a render that has not yet been taken by the writer thread.
-    ///
-    /// Control messages can overtake the single pending render slot. Pane-focus
-    /// notification acknowledgements use this before requesting a full repaint
-    /// so the client cannot mistake an older pane frame for the focused target.
-    pub(crate) fn discard_pending(&self) -> bool {
-        #[cfg(test)]
-        if self.test_render.is_some() {
-            return false;
-        }
-        self.queue.discard_pending_render()
-    }
 }
 
 #[derive(Debug)]
@@ -1921,36 +1908,6 @@ mod tests {
     }
 
     #[test]
-    fn discarding_pending_render_orders_activation_before_focused_frame() {
-        let (writer, queue) = test_queue_writer();
-        let stale = frame_server_message(&ServerMessage::WindowTitle {
-            title: Some("stale".into()),
-        });
-        let activation = frame_server_message(&ServerMessage::NotificationActivationResolved {
-            activation_id: 42,
-            focused: true,
-        });
-        let focused = frame_server_message(&ServerMessage::WindowTitle {
-            title: Some("focused".into()),
-        });
-
-        writer.render.try_send(stale).expect("queue stale render");
-        assert!(writer.render.discard_pending());
-        writer
-            .control
-            .send(activation.clone())
-            .expect("queue activation acknowledgement");
-        writer
-            .render
-            .try_send(focused.clone())
-            .expect("queue focused render");
-
-        assert_eq!(queue.recv(), Some(ClientWriteItem::Control(activation)));
-        assert_eq!(queue.recv(), Some(ClientWriteItem::Render(focused)));
-        assert!(!writer.render.discard_pending());
-    }
-
-    #[test]
     fn client_writer_prioritizes_control_and_reports_render_drain() {
         let (mut client_stream, server_stream, _path) = local_stream_pair("client-writer-priority");
         let (writer, queue) = test_queue_writer();
@@ -2694,42 +2651,6 @@ mod tests {
                 assert_eq!(data, b"still connected");
             }
             other => panic!("expected ClientInput after rejection, got {other:?}"),
-        }
-
-        drop(client_stream);
-        should_quit.store(true, Ordering::Release);
-        handle
-            .join()
-            .expect("read thread join")
-            .expect("read thread result");
-    }
-
-    #[test]
-    fn client_read_loop_forwards_notification_activation() {
-        let (mut client_stream, server_stream, _path) =
-            local_stream_pair("client-read-notification-activation");
-        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
-        let should_quit = Arc::new(AtomicBool::new(false));
-        let read_quit = should_quit.clone();
-        let handle = std::thread::spawn(move || {
-            client_read_loop(server_stream, 7, &server_event_tx, &read_quit)
-        });
-
-        protocol::write_message(
-            &mut client_stream,
-            &ClientMessage::NotificationActivated { activation_id: 42 },
-        )
-        .expect("write notification activation");
-
-        match recv_server_event(&mut server_event_rx, "notification activation") {
-            ServerEvent::ClientNotificationActivated {
-                client_id,
-                activation_id,
-            } => {
-                assert_eq!(client_id, 7);
-                assert_eq!(activation_id, 42);
-            }
-            other => panic!("expected ClientNotificationActivated, got {other:?}"),
         }
 
         drop(client_stream);

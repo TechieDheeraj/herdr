@@ -238,8 +238,6 @@ pub struct HeadlessServer {
     next_activity_stamp: u64,
     /// Configured virtual terminal size used when no clients are connected.
     headless_size: (u16, u16),
-    /// Process-local capability sequence for actionable notifications.
-    next_notification_activation_id: u64,
     /// Shared pane runtime size derived from the foreground client, or the
     /// configured headless size when no clients are connected.
     effective_size: (u16, u16),
@@ -386,7 +384,6 @@ impl HeadlessServer {
             deferred_alt_screen_reads: Vec::new(),
             next_activity_stamp: 1,
             headless_size,
-            next_notification_activation_id: notification_activation_seed(),
             effective_size: headless_size,
             shutting_down: false,
             host_shutdown_requested: Arc::new(AtomicBool::new(false)),
@@ -846,7 +843,7 @@ impl HeadlessServer {
         apply_keybindings(&mut self.app, &server_keybindings);
         self.sync_visible_server_config_diagnostic(false);
         if outer_terminal_focus == Some(true) {
-            self.app.state.mark_active_tab_seen();
+            self.app.state.mark_focused_pane_seen();
         }
         self.app.set_host_terminal_state(
             host_terminal_theme,
@@ -889,9 +886,9 @@ impl HeadlessServer {
         self.clients.get(&client_id)?.outer_terminal_focus
     }
 
-    fn focused_pane_suppresses_notifications(&self, is_focused_pane: bool) -> bool {
+    fn focused_pane_suppresses_notifications(&self, is_active_tab: bool) -> bool {
         crate::app::actions::focused_pane_suppresses_notifications(
-            is_focused_pane,
+            is_active_tab,
             self.foreground_client_outer_focus(),
         )
     }
@@ -909,9 +906,6 @@ impl HeadlessServer {
         let changed = self.foreground_client_id != Some(client_id);
         self.foreground_client_id = Some(client_id);
         self.sync_foreground_client_state();
-        if changed && self.foreground_client_outer_focus() == Some(true) {
-            self.app.state.mark_focused_pane_seen();
-        }
         changed
     }
 
@@ -920,9 +914,6 @@ impl HeadlessServer {
         let changed = next_foreground != self.foreground_client_id;
         self.foreground_client_id = next_foreground;
         self.sync_foreground_client_state();
-        if changed && self.foreground_client_outer_focus() == Some(true) {
-            self.app.state.mark_focused_pane_seen();
-        }
         changed
     }
 
@@ -1674,16 +1665,15 @@ impl HeadlessServer {
         };
 
         if let Some(client) = self.clients.get(&client_id) {
-            let Some(writer) = &client.writer else {
-                return false;
-            };
-            if writer.control.send(serialized).is_err() {
-                debug!(
-                    client_id,
-                    "client writer channel closed during targeted send"
-                );
-                self.remove_client_and_resize_if_needed(client_id);
-                return false;
+            if let Some(writer) = &client.writer {
+                if writer.control.send(serialized).is_err() {
+                    debug!(
+                        client_id,
+                        "client writer channel closed during targeted send"
+                    );
+                    self.remove_client_and_resize_if_needed(client_id);
+                    return false;
+                }
             }
             true
         } else {
@@ -2070,10 +2060,6 @@ impl HeadlessServer {
                 target,
                 takeover,
             } => self.control_terminal_client(client_id, target, takeover),
-            ServerEvent::ClientNotificationActivated {
-                client_id,
-                activation_id,
-            } => self.handle_client_notification_activation(client_id, activation_id),
             ServerEvent::ClientAttachScroll {
                 client_id,
                 source,
@@ -2696,83 +2682,6 @@ impl HeadlessServer {
         )
     }
 
-    fn handle_client_notification_activation(
-        &mut self,
-        client_id: u64,
-        activation_id: u64,
-    ) -> bool {
-        let Some(client) = self.clients.get_mut(&client_id) else {
-            return false;
-        };
-        if !client.is_full_app_client() || client.writer.is_none() {
-            return false;
-        }
-        let Some(pane_id) = client.take_notification_activation(activation_id, Instant::now())
-        else {
-            let _ = self.send_to_client(
-                client_id,
-                ServerMessage::NotificationActivationResolved {
-                    activation_id,
-                    focused: false,
-                },
-            );
-            return false;
-        };
-        let Some((ws_idx, _)) = self.app.find_pane(pane_id) else {
-            let _ = self.send_to_client(
-                client_id,
-                ServerMessage::NotificationActivationResolved {
-                    activation_id,
-                    focused: false,
-                },
-            );
-            return false;
-        };
-        let Some(public_pane_id) = self.app.public_pane_id(ws_idx, pane_id) else {
-            let _ = self.send_to_client(
-                client_id,
-                ServerMessage::NotificationActivationResolved {
-                    activation_id,
-                    focused: false,
-                },
-            );
-            return false;
-        };
-
-        let focus_response = self
-            .app
-            .runtime_pane_focus("notification-activate", public_pane_id);
-        if serde_json::from_str::<api::schema::SuccessResponse>(&focus_response).is_err() {
-            let _ = self.send_to_client(
-                client_id,
-                ServerMessage::NotificationActivationResolved {
-                    activation_id,
-                    focused: false,
-                },
-            );
-            return false;
-        }
-        if let Some(client) = self.clients.get_mut(&client_id) {
-            if let Some(writer) = &client.writer {
-                let _ = writer.render.discard_pending();
-            }
-            client.request_repaint();
-        }
-        let foreground_changed = self.promote_client_to_foreground(client_id);
-        if foreground_changed {
-            self.resize_shared_runtime_to_effective_size_before_input();
-        }
-        self.sync_foreground_client_state();
-        let _ = self.send_to_client(
-            client_id,
-            ServerMessage::NotificationActivationResolved {
-                activation_id,
-                focused: true,
-            },
-        );
-        true
-    }
-
     fn agent_read_not_idle_error(
         &self,
         request: &api::schema::Request,
@@ -3085,6 +2994,8 @@ impl HeadlessServer {
         // pane.report_agent trigger handle_internal_event internally, which
         // bypasses drain_internal_events_with_forwarding. Headless mode disables
         // local sound playback, so sound notifications need to be forwarded here.
+        let mark_agent_unread =
+            matches!(msg.request.method, api::schema::Method::AgentMarkUnread(_));
         let toast_before = self.app.state.toast.clone();
         let pane_states_before: Vec<(
             usize,
@@ -3181,6 +3092,23 @@ impl HeadlessServer {
             self.app
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
+        if mark_agent_unread {
+            if let Ok(api::schema::SuccessResponse {
+                result: api::schema::ResponseResult::AgentInfo { agent },
+                ..
+            }) = serde_json::from_str(&response)
+            {
+                if let Ok(data) = serde_json::to_string(&protocol::endpoint::AgentUnread {
+                    boot_id: self.client_shell_boot_id.clone(),
+                    pane_id: agent.pane_id,
+                }) {
+                    self.send_to_client_shells(protocol::ServerMessage::EndpointControl {
+                        kind: protocol::endpoint::AGENT_UNREAD_KIND.into(),
+                        data,
+                    });
+                }
+            }
+        }
         if let Some(snapshot) = frozen_alt_screen_read {
             if let Ok(mut success) = serde_json::from_str::<api::schema::SuccessResponse>(&response)
             {
@@ -3226,22 +3154,12 @@ impl HeadlessServer {
         {
             if let Some(toast) = &toast_after {
                 debug!(title = %toast.title, body = %toast.context, "forwarding toast notification from API request");
-                let kind = toast_notify_kind(self.app.state.toast_config.delivery)
-                    .expect("toast forwarding requires a client notification kind");
-                if let Some(target) = &toast.target {
-                    self.send_pane_notify_to_foreground_client(
-                        kind,
-                        &toast.title,
-                        non_empty_body(&toast.context),
-                        target.pane_id,
-                    );
-                } else {
-                    self.send_notify_to_foreground_client(
-                        kind,
-                        &toast.title,
-                        non_empty_body(&toast.context),
-                    );
-                }
+                self.send_notify_to_foreground_client(
+                    toast_notify_kind(self.app.state.toast_config.delivery)
+                        .expect("toast forwarding requires a client notification kind"),
+                    &toast.title,
+                    non_empty_body(&toast.context),
+                );
                 true
             } else {
                 false
@@ -3334,12 +3252,11 @@ impl HeadlessServer {
                             *ws_idx,
                             *pane_id,
                         );
-                        self.send_pane_notify_to_foreground_client(
+                        self.send_notify_to_foreground_client(
                             toast_notify_kind(self.app.state.toast_config.delivery)
                                 .expect("toast forwarding requires a client notification kind"),
                             format!("{agent_label} {event_text}"),
                             non_empty_body(&context),
-                            *pane_id,
                         );
                     }
                 }
@@ -3429,6 +3346,8 @@ impl HeadlessServer {
         {
             self.app.start_restored_worktree_validation(now);
         }
+
+        self.app.start_health_sample_if_due(now);
 
         if self.git_refresh_scheduled() {
             self.app.start_git_status_refresh_if_due(now);

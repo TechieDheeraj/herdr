@@ -44,6 +44,7 @@ impl ClientShellState {
             && self.popup_terminal_id.is_none()
             && self.outer_focused != Some(false)
             && self.chrome_drag.is_none()
+            && self.pane_drag.is_none()
             && self.pane_mouse_gesture.is_none()
     }
 

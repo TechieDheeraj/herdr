@@ -6,9 +6,11 @@ use crate::protocol::{
 };
 use crossterm::event::MouseEvent;
 mod text_editing;
+mod unread_notifications;
 
 pub(super) fn snapshot() -> ClientShellSnapshot {
     ClientShellSnapshot {
+        health: crate::health::HealthSnapshot::default(),
         boot_id: "boot-1".into(),
         revision: 1,
         config_diagnostic: None,
@@ -185,6 +187,7 @@ fn pane_scroll_result(
             foreground_cwd: None,
             restore_error: None,
             label: None,
+            display_label: None,
             agent: None,
             title: None,
             terminal_title: None,
@@ -253,6 +256,7 @@ mod copy;
 mod endpoint_requests;
 mod endpoints;
 mod graphics;
+mod health_colors;
 mod input_conformance;
 #[path = "input.rs"]
 mod input_domain;

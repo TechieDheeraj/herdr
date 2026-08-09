@@ -240,7 +240,6 @@ impl AppState {
             return false;
         }
 
-        self.switch_workspace_tab(ws_idx, tab_idx);
         if let Some(tab) = self
             .workspaces
             .get_mut(ws_idx)
@@ -250,14 +249,13 @@ impl AppState {
             // the tab switch from briefly acknowledging a different pane that
             // happened to be focused the last time the tab was visible.
             tab.layout.focus_pane(pane_id);
-            self.previous_pane_focus = previous;
-            self.mark_session_dirty();
-            return true;
+        } else {
+            return false;
         }
         self.switch_workspace_tab(ws_idx, tab_idx);
         self.previous_pane_focus = previous;
         self.mark_session_dirty();
-        self.sync_copy_mode_with_focus();
+        self.set_pane_seen(ws_idx, pane_id, true);
         true
     }
 }

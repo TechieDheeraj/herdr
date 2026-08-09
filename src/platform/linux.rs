@@ -254,10 +254,55 @@ pub(crate) fn should_query_host_terminal_palette() -> bool {
 pub(crate) fn health_probe() -> crate::health::PlatformHealthProbe {
     crate::health::PlatformHealthProbe {
         cpu_times: read_cpu_times("/proc/stat"),
+        temperature_celsius: read_temperature_celsius("/sys/class/thermal", "/sys/class/hwmon"),
         battery: read_battery_health("/sys/class/power_supply"),
         ram: read_memory_usage("/proc/meminfo"),
         disk: read_disk_usage("/"),
     }
+}
+
+fn read_temperature_celsius(thermal_root: &str, hwmon_root: &str) -> Option<i16> {
+    let thermal = std::fs::read_dir(thermal_root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("thermal_zone")
+        })
+        .filter_map(|entry| read_millidegree_temperature(&entry.path().join("temp")));
+    let hwmon = std::fs::read_dir(hwmon_root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .flat_map(|entry| {
+            std::fs::read_dir(entry.path())
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+        })
+        .filter(|entry| is_hwmon_temperature_input(&entry.file_name().to_string_lossy()))
+        .filter_map(|entry| read_millidegree_temperature(&entry.path()));
+
+    thermal.chain(hwmon).max()
+}
+
+fn read_millidegree_temperature(path: &std::path::Path) -> Option<i16> {
+    let value = std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<i64>()
+        .ok()?;
+    crate::health::celsius_from_scaled(value, 1, 0)
+}
+
+fn is_hwmon_temperature_input(file_name: &str) -> bool {
+    file_name
+        .strip_prefix("temp")
+        .and_then(|name| name.strip_suffix("_input"))
+        .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn read_cpu_times(path: &str) -> Option<crate::health::CpuTimes> {
@@ -1338,6 +1383,32 @@ mod tests {
         assert_eq!(parse_battery_charging("Discharging"), Some(false));
         assert_eq!(parse_battery_charging("Not charging"), Some(false));
         assert_eq!(parse_battery_charging("Unknown"), None);
+    }
+
+    #[test]
+    fn health_reads_hottest_valid_linux_temperature_sensor() {
+        let base = std::env::temp_dir().join(format!(
+            "herdr-health-temperature-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let thermal = base.join("thermal");
+        let hwmon = base.join("hwmon");
+        std::fs::create_dir_all(thermal.join("thermal_zone0")).unwrap();
+        std::fs::create_dir_all(hwmon.join("hwmon0")).unwrap();
+        std::fs::write(thermal.join("thermal_zone0/temp"), "41500\n").unwrap();
+        std::fs::write(hwmon.join("hwmon0/temp1_input"), "53750\n").unwrap();
+        std::fs::write(hwmon.join("hwmon0/temp1_max"), "95000\n").unwrap();
+
+        assert_eq!(
+            read_temperature_celsius(
+                thermal.to_string_lossy().as_ref(),
+                hwmon.to_string_lossy().as_ref(),
+            ),
+            Some(54)
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

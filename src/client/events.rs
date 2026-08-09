@@ -2,6 +2,8 @@ use super::*;
 
 /// Internal events for the client event loop.
 pub(super) enum ClientLoopEvent {
+    #[cfg(target_os = "macos")]
+    NotificationActivated(u64),
     #[cfg(unix)]
     StdinInput(Vec<u8>),
     #[cfg(unix)]

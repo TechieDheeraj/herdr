@@ -264,14 +264,10 @@ pub(super) fn agent_row(
         .panes
         .iter()
         .find(|pane| pane.pane_id == agent.pane_id);
-    let tab_count = snapshot
-        .tabs
-        .iter()
-        .filter(|candidate| candidate.workspace_id == agent.workspace_id)
-        .count();
-    let tab_label = tab
-        .filter(|tab| tab_count > 1 || tab.custom_label)
-        .map(|tab| tab.label.as_str());
+    let tab_label = tab.map(|tab| tab.label.as_str());
+    let directory = pane
+        .and_then(|pane| pane.cwd.as_deref().or(pane.foreground_cwd.as_deref()))
+        .map(directory_basename);
     let agent_label = agent
         .display_agent
         .as_deref()
@@ -302,6 +298,7 @@ pub(super) fn agent_row(
                 .title
                 .as_deref()
                 .or_else(|| pane.and_then(|pane| pane.label.as_deref())),
+            directory,
             agent_label,
             terminal_title: agent.terminal_title.as_deref(),
             terminal_title_stripped: agent.terminal_title_stripped.as_deref(),
@@ -316,6 +313,15 @@ pub(super) fn agent_row(
         focused: agent.focused,
         rows,
     })
+}
+
+fn directory_basename(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        path
+    } else {
+        trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed)
+    }
 }
 
 pub(super) fn render_agent_row(
