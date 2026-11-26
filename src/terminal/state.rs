@@ -1941,6 +1941,35 @@ impl TerminalState {
         }
     }
 
+    /// Apply a pane-local client identity through the native resume lifecycle.
+    pub(crate) fn observe_codex_session(
+        &mut self,
+        session_id: String,
+    ) -> Option<TerminalStateMutation> {
+        if self.detected_agent != Some(Agent::Codex) || self.recent_agent_process_exit.is_some() {
+            return None;
+        }
+        let session_ref = crate::agent_resume::AgentSessionRef::id(session_id)?;
+        if self.session_ref_is_current(&session_ref) {
+            return None;
+        }
+        // Use the existing sequence and session-replacement machinery without
+        // comparing timestamps produced by different platforms or reporters.
+        let seq = self
+            .hook_report_sequences
+            .get("herdr:codex")
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)?;
+        self.set_agent_session_ref_for_session_start(
+            "herdr:codex".into(),
+            "codex".into(),
+            Some(session_ref),
+            Some(seq),
+            Some("resume".into()),
+        )
+    }
+
     /// Same ordering rule as lifecycle reports, evaluated before the report is
     /// applied so a duplicate cannot pass as the report that was just accepted.
     pub fn hook_report_is_newer(&self, source: &str, seq: Option<u64>) -> bool {
@@ -2456,6 +2485,37 @@ mod tests {
 
     fn test_terminal() -> TerminalState {
         TerminalState::new(TerminalId::alloc(), "/tmp".into())
+    }
+
+    #[test]
+    fn observed_codex_identity_replaces_hook_identity_and_tracks_selection() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        terminal
+            .set_agent_session_ref_for_session_start(
+                "herdr:codex".into(),
+                "codex".into(),
+                crate::agent_resume::AgentSessionRef::id("old"),
+                Some(1_000_000),
+                Some("startup".into()),
+            )
+            .unwrap();
+        for id in ["first-selection", "second-selection", "old"] {
+            let mutation = terminal.observe_codex_session(id.into()).unwrap();
+            assert!(mutation.session_ref_changed);
+            assert_eq!(
+                terminal
+                    .persisted_agent_session
+                    .as_ref()
+                    .unwrap()
+                    .session_ref
+                    .value,
+                id
+            );
+            assert!(terminal.observe_codex_session(id.into()).is_none());
+        }
+        terminal.set_detected_state(None, AgentState::Unknown);
+        assert!(terminal.observe_codex_session("late".into()).is_none());
     }
 
     fn test_session_path(name: &str) -> String {

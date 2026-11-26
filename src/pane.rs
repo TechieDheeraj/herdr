@@ -30,6 +30,7 @@ mod cursor;
 mod input;
 mod kitty_keyboard;
 mod osc;
+mod session_identity;
 mod state;
 mod terminal;
 mod xtgettcap;
@@ -965,6 +966,7 @@ fn spawn_basic_detection_task(
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
         let mut last_codex_prompt_ready = false;
+        let mut session_identity = session_identity::SessionIdentity::default();
         let mut last_self_reported_shell_check = None;
         let mut agent_job = AgentJobTracker::default();
 
@@ -977,6 +979,7 @@ fn spawn_basic_detection_task(
             tokio::select! {
                 _ = tokio::time::sleep(sleep_duration) => {}
                 _ = detect_reset.notified() => {
+                    session_identity = session_identity::SessionIdentity::default();
                     publish_codex_prompt_observation(
                         &state_events, pane_id, Some(Agent::Codex), "", None, false,
                         &mut last_codex_prompt_ready,
@@ -1099,6 +1102,7 @@ fn spawn_basic_detection_task(
                         || foreground_action
                             == ForegroundShellAgentAction::ReportReplacementProcess;
                     if agent_changed {
+                        session_identity = session_identity::SessionIdentity::default();
                         pending_idle.clear();
                         last_codex_prompt_ready = false;
                         last_screen_scan_detection_content_seq = None;
@@ -1140,6 +1144,7 @@ fn spawn_basic_detection_task(
 
             if let Some(until) = agent_startup_grace_until {
                 if process_exited {
+                    session_identity = session_identity::SessionIdentity::default();
                     agent_startup_grace_until = None;
                     pending_idle.clear();
                 } else {
@@ -1174,7 +1179,13 @@ fn spawn_basic_detection_task(
 
             let content_changed = last_detection_text
                 .refresh(agent, &content_seq, || terminal.detection_text_for_cache());
+            if agent_changed || process_exited {
+                session_identity = session_identity::SessionIdentity::default();
+            }
             let content = &last_detection_text.text;
+            session_identity
+                .observe(&state_events, pane_id, agent, content, process_exited)
+                .await;
             last_screen_scan_detection_content_seq = current_detection_content_seq;
             let osc_title = terminal.agent_osc_title();
             let osc_progress = terminal.agent_osc_progress();
@@ -2925,6 +2936,7 @@ impl PaneRuntime {
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
                 let mut last_codex_prompt_ready = false;
+                let mut session_identity = session_identity::SessionIdentity::default();
                 let mut last_self_reported_shell_check = None;
                 let mut agent_job = AgentJobTracker::default();
 
@@ -2947,6 +2959,7 @@ impl PaneRuntime {
                     tokio::select! {
                         _ = tokio::time::sleep(tick) => {}
                         _ = detect_reset.notified() => {
+                            session_identity = session_identity::SessionIdentity::default();
                             publish_codex_prompt_observation(
                                 &state_events, pane_id, Some(Agent::Codex), "", None, false,
                                 &mut last_codex_prompt_ready,
@@ -3107,6 +3120,7 @@ impl PaneRuntime {
                                 {
                                     pending_idle.clear();
                                     last_codex_prompt_ready = false;
+                                    session_identity = session_identity::SessionIdentity::default();
                                     last_screen_scan_detection_content_seq = None;
                                     // A replacement agent must not inherit OSC
                                     // evidence from the previous process; a first
@@ -3181,6 +3195,7 @@ impl PaneRuntime {
 
                     if let Some(until) = agent_startup_grace_until {
                         if process_exited {
+                            session_identity = session_identity::SessionIdentity::default();
                             agent_startup_grace_until = None;
                             last_screen_scan_detection_content_seq = None;
                             pending_idle.clear();
@@ -3217,7 +3232,13 @@ impl PaneRuntime {
                         last_detection_text.refresh(agent, &text_content_seq, || {
                             terminal.detection_text_for_cache()
                         });
+                    if agent_changed || process_exited {
+                        session_identity = session_identity::SessionIdentity::default();
+                    }
                     let content = &last_detection_text.text;
+                    session_identity
+                        .observe(&state_events, pane_id, agent, content, process_exited)
+                        .await;
                     last_screen_scan_detection_content_seq = current_detection_content_seq;
                     let osc_title = terminal.agent_osc_title();
                     let osc_progress = terminal.agent_osc_progress();

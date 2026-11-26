@@ -1435,7 +1435,7 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 10);
+    assert_eq!(codex.expected_version, 11);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1508,17 +1508,38 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     fs::create_dir_all(&codex_dir).unwrap();
     fs::write(
         codex_dir.join("config.toml"),
-        "[features]\ncodex_hooks = false\nother = true\n",
+        "[features]\ncodex_hooks = false\nother = true\n\n[tui]\nstatus_line = [\"git-branch\", \"session-id\", \"model\"]\n",
     )
     .unwrap();
     std::env::set_var("HOME", &home);
 
     install_codex().unwrap();
+    let first_config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
     install_codex().unwrap();
 
     let hooks: Value =
         serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
     let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
+    assert_eq!(config, first_config);
+    let migration: Value = serde_json::from_str(
+        &fs::read_to_string(codex_dir.join("herdr-codex-status-line.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        migration["items"],
+        json!(["session-id", "git-branch", "model"])
+    );
+    assert_eq!(migration["version"], CODEX_INTEGRATION_VERSION);
+
+    let parsed: toml::Value = toml::from_str(&config).unwrap();
+    assert_eq!(
+        parsed["tui"]["status_line"].as_array().unwrap(),
+        &[
+            toml::Value::String("session-id".into()),
+            toml::Value::String("git-branch".into()),
+            toml::Value::String("model".into()),
+        ]
+    );
 
     assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());

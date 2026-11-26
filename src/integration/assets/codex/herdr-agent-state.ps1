@@ -2,7 +2,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=codex
-# HERDR_INTEGRATION_VERSION=10
+# HERDR_INTEGRATION_VERSION=11
 
 param([string]$Action = "")
 
@@ -30,6 +30,24 @@ if (-not [string]::IsNullOrWhiteSpace($env:CODEX_THREAD_ID) -and $env:CODEX_THRE
 $seq = [DateTimeOffset]::UtcNow.Ticks
 $herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
 try {
+    $info = (& $herdr pane process-info --pane $env:HERDR_PANE_ID 2>$null | ConvertFrom-Json).result.process_info
+    $foreground = @($info.foreground_processes | ForEach-Object { $_.pid })
+    $parents = @{}
+    $commands = @{}
+    Get-CimInstance Win32_Process | ForEach-Object {
+        $parents[[int]$_.ProcessId] = [int]$_.ParentProcessId
+        $commands[[int]$_.ProcessId] = $_.CommandLine
+    }
+    $ancestor = $PID
+    $owned = $false
+    for ($depth = 0; $depth -lt 64 -and $ancestor -gt 0; $depth++) {
+        # Shared app-server children may retain the launching client's PPID.
+        # Only embedded hooks may claim that client's pane environment.
+        if ($commands[$ancestor] -match '\bapp-server(?:-daemon)?\b') { exit 0 }
+        if ($foreground -contains $ancestor) { $owned = $true; break }
+        $ancestor = $parents[$ancestor]
+    }
+    if (-not $owned) { exit 0 }
     $args = @(
         "pane",
         "report-agent-session",

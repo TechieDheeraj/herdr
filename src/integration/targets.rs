@@ -159,13 +159,68 @@ pub(crate) fn install_claude() -> io::Result<ClaudeInstallPaths> {
 
 pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     let dir = codex_dir()?;
-    check_config_targets(&dir, &["hooks.json", "config.toml"])?;
+    check_config_targets(
+        &dir,
+        &["hooks.json", "config.toml", "herdr-codex-status-line.json"],
+    )?;
     if !dir.is_dir() {
         return Err(io::Error::other(format!(
             "codex config directory not found at {}. install codex first",
             dir.display()
         )));
     }
+
+    let config_path = dir.join("config.toml");
+    let existing_config = if config_path.is_file() {
+        fs::read_to_string(&config_path)?
+    } else {
+        String::new()
+    };
+    let mut document = build_codex_config_with_hooks(&existing_config)
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| io::Error::other(format!("invalid Codex config: {err}")))?;
+    if document
+        .get("tui")
+        .is_some_and(|tui| tui.as_table_like().is_none())
+    {
+        return Err(io::Error::other("Codex tui must be a table"));
+    }
+    if document
+        .get("tui")
+        .and_then(|tui| tui.get("status_line"))
+        .is_some_and(|value| {
+            value
+                .as_array()
+                .is_none_or(|items| items.iter().any(|item| item.as_str().is_none()))
+        })
+    {
+        return Err(io::Error::other(
+            "Codex tui.status_line must be an array of strings",
+        ));
+    }
+    // The shared Codex daemon does not inherit each terminal client's pane
+    // identity. Its client-rendered session footer provides that association.
+    let mut status_line = document
+        .get("tui")
+        .and_then(|tui| tui.get("status_line"))
+        .and_then(toml_edit::Item::as_array)
+        .cloned()
+        .unwrap_or_else(|| {
+            ["model-with-reasoning", "current-dir", "thread-name"]
+                .into_iter()
+                .collect()
+        });
+    status_line.retain(|value| value.as_str() != Some("session-id"));
+    status_line.insert(0, "session-id");
+    let migration_items: Vec<&str> = status_line
+        .iter()
+        .filter_map(toml_edit::Value::as_str)
+        .collect();
+    let migration_json = serde_json::to_string(
+        &json!({"version": super::CODEX_INTEGRATION_VERSION, "items": migration_items}),
+    )?;
+    document["tui"]["status_line"] = toml_edit::value(status_line);
+    let new_config = document.to_string();
 
     let hook_path = dir.join(CODEX_HOOK_INSTALL_NAME);
     fs::write(&hook_path, CODEX_HOOK_ASSET)?;
@@ -204,15 +259,15 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
 
     write_config(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
 
-    let config_path = dir.join("config.toml");
-    let existing_config = if config_path.is_file() {
-        fs::read_to_string(&config_path)?
-    } else {
-        String::new()
-    };
-    let new_config = build_codex_config_with_hooks(&existing_config);
     if new_config != existing_config {
         write_config(&config_path, new_config)?;
+    }
+
+    // The handoff helper uses Python's standard JSON reader, including on
+    // systems whose Python predates tomllib. Export only the selected fields.
+    let migration_path = dir.join("herdr-codex-status-line.json");
+    if fs::read_to_string(&migration_path).ok().as_deref() != Some(&migration_json) {
+        write_config(&migration_path, migration_json)?;
     }
 
     Ok(CodexInstallPaths {
@@ -640,6 +695,8 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
 
     let removed_hook_file =
         remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+
+    remove_file_if_exists(&codex_dir.join("herdr-codex-status-line.json"))?;
 
     Ok(CodexUninstallResult {
         hook_path,

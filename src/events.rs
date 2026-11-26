@@ -91,6 +91,8 @@ pub enum AppEvent {
     },
     /// The current Codex input screen is visible during managed startup.
     CodexPromptObserved { pane_id: PaneId, ready: bool },
+    /// A live client rendered its current native conversation identity.
+    CodexSessionObserved { pane_id: PaneId, session_id: String },
     /// Fallback detector state changed in a pane.
     StateChanged {
         pane_id: PaneId,

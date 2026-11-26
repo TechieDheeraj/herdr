@@ -137,6 +137,17 @@ When you hand off an older server on Linux or macOS with native agent restore en
 
 The lookup runs once during handoff. An idle CLI can close its transcript, and an older CLI may expose no usable evidence. Such a pane stays live through handoff and can reopen as a shell after reboot. Before rebooting, run `herdr --session <name> pane list` on each server and look for `agent_session` in the relevant panes. Keep the official integrations installed so later session changes are reported as usual.
 
+Codex's shared app-server owns the transcripts and can inherit a different client's pane environment. Herdr therefore also reads the full conversation ID from each client's native status line. Integration version `11` prepends `session-id` to `tui.status_line` in Codex's config, preserving other items. Run `herdr integration install codex` on every host that runs Codex. New clients report automatically when that footer is visible; keep the complete ID visible. This was verified with Codex `0.172.0`, including conversation switches and clients without trusted hooks. It does not require OSC 7577 support in Codex.
+
+Existing clients do not reload the status-line config. Before handoff, the source-tree helper below enables it in idle Codex panes with an empty composer and verifies that Herdr captured their IDs. It never submits an agent task. Busy panes, drafts, scrolled viewports, or unsupported clients are reported as pending and left for a later retry. Do not treat a successful server handoff alone as confirmation that every agent can resume.
+
+```bash
+python3 scripts/codex-session-handoff.py --herdr "$(command -v herdr)" --session <name>
+```
+
+The helper also installs the Codex integration for future clients. Run it on the host that owns the panes. It requires no conversation IDs as input. Your fork installer can invoke it before `server live-handoff`; rerunning it is safe.
+
+
 Unlike snapshot restore, pane history replay, and native agent session restore, handoff tries to keep the current processes alive rather than reconstructing state after the old server stops.
 
 A successful handoff preserves long-lived server-owned session state: pane PTYs and processes, agent identity and durable metadata, and plugin/session state needed by the replacement server. It does not preserve transient coordination across the replacement boundary. In-flight CLI or API requests, waits, subscription streams, client sockets, and pane-to-pane messages may be interrupted; clients should reconnect and retry them.

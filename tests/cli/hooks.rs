@@ -56,6 +56,16 @@ fn run_shell_hook_with_env(
     hook_input: &str,
     envs: &[(&str, &str)],
 ) -> Option<serde_json::Value> {
+    run_shell_hook_with_owner(asset_path, args, hook_input, envs, true)
+}
+
+fn run_shell_hook_with_owner(
+    asset_path: &str,
+    args: &[&str],
+    hook_input: &str,
+    envs: &[(&str, &str)],
+    owns_pane: bool,
+) -> Option<serde_json::Value> {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let socket_path = base.join("herdr.sock");
@@ -74,6 +84,15 @@ fn run_shell_hook_with_env(
                     let mut line = String::new();
                     let mut reader = BufReader::new(stream.try_clone().unwrap());
                     reader.read_line(&mut line).unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    if request["method"] == "pane.process_info" {
+                        let pid = if owns_pane { std::process::id() } else { 0 };
+                        let reply = serde_json::json!({"id":"test", "result":{
+                            "process_info":{"foreground_processes":[{"pid":pid}]}
+                        }});
+                        writeln!(stream, "{reply}").unwrap();
+                        continue;
+                    }
                     let _ = stream.write_all(br#"{"id":"test","result":{"type":"ok"}}"#);
                     let _ = stream.write_all(b"\n");
                     let _ = stream.flush();
@@ -385,4 +404,15 @@ fn devin_hook_ignores_non_matching_session_list_entries() {
     );
 
     assert!(request.is_none());
+}
+
+#[test]
+fn codex_daemon_hook_cannot_report_to_an_unrelated_inherited_pane() {
+    assert!(run_shell_hook_with_owner(
+        "src/integration/assets/codex/herdr-agent-state.sh",
+        &["session"],
+        r#"{"hook_event_name":"SessionStart","session_id":"wrong-pane-session","transcript_path":"/tmp/session.jsonl","source":"resume"}"#,
+        &[],
+        false,
+    ).is_none());
 }

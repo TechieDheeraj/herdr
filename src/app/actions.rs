@@ -1555,6 +1555,15 @@ impl AppState {
                 })
                 .into_iter()
                 .collect(),
+            AppEvent::CodexSessionObserved {
+                pane_id,
+                session_id,
+            } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.observe_codex_session(session_id)
+                })
+                .into_iter()
+                .collect(),
             AppEvent::AgentSessionReported {
                 pane_id,
                 source,
