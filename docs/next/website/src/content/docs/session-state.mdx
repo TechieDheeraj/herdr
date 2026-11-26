@@ -81,11 +81,11 @@ Native agent session restore is enabled by default. Disable it with:
 resume_agents_on_restore = false
 ```
 
-Herdr resumes panes that reported a native session reference through a current official Herdr integration, and panes whose agent reported its own resume command. See [Add Herdr support to your agent](/docs/add-herdr-support/).
+Herdr can resume a pane using a session reference reported by its official integration, a conversation ID identified during live handoff, or a resume command reported by the agent. See [Add Herdr support to your agent](/docs/add-herdr-support/).
 
 After a client attaches and provides terminal size and theme context, Herdr resumes eligible restored agent panes across workspaces and tabs without waiting for each pane to be focused.
 
-Native session restore requires these Herdr integration versions or newer:
+For hooks to report native session references, install these Herdr integration versions or newer:
 
 | Agent | Minimum Herdr integration version | Resume command |
 | --- | --- | --- |
@@ -114,9 +114,28 @@ Unsupported, missing, invalid, duplicated, or stale session references restore a
 
 If native agent session restore applies to a pane, Herdr resumes the agent session instead of replaying saved pane history for that pane.
 
+## Program resume with OSC 7577
+
+On Linux and macOS, programs that implement OSC 7577 can tell Herdr which executable, arguments, and working directory reopen their session after a server restart. Enable the executables you trust in your server's configuration. For example, if your editor reports its command as `nvim`, use:
+
+```toml
+[session]
+program_resume_allowlist = ["nvim"]
+```
+
+The default list is empty. Each entry matches the reported executable exactly. An absolute path and a bare command name are separate entries. An entry permits the executable to receive arguments supplied by processes that have the pane token. Reload the configuration and open a new pane for the program to receive its own `OSC7577_TOKEN`. Keep this variable out of remote and sandboxed child environments.
+
+Herdr verifies the report, its age, and its owning process. A newer accepted report replaces the previous command for the pane. A signed clear from its owner or the owner's exit removes it. On cold restore, Herdr checks the allowlist, user, and saved directory again. Existing native agent restore takes precedence. An eligible OSC program starts directly on the new PTY using the server's launch environment and PATH. The pane returns to a shell when the program exits. A resumed program should report again to request another restore. Live handoff keeps the existing process running.
+
+Program authors can find the wire format and signing rules in the [Program Resume Protocol specification](https://www.superlogical.com/rex/docs/build/program-resume).
+
 ## Live handoff
 
 Live handoff is for update and remote attach flows that need to replace a running Herdr server. It asks the old server to transfer live panes to the new server, so pane processes can keep running across the server replacement.
+
+When you hand off an older server on Linux or macOS with native agent restore enabled, the receiving server also checks live foreground Claude Code, Codex, and GitHub Copilot CLI panes for missing conversation IDs. Existing session references take priority. Herdr can identify an agent's open writable transcript in its session store, or a Copilot session lock created during the owning process's lifetime. For Codex it checks the rollout's session metadata to exclude subagents.
+
+The lookup runs once during handoff. An idle CLI can close its transcript, and an older CLI may expose no usable evidence. Such a pane stays live through handoff and can reopen as a shell after reboot. Before rebooting, run `herdr --session <name> pane list` on each server and look for `agent_session` in the relevant panes. Keep the official integrations installed so later session changes are reported as usual.
 
 Unlike snapshot restore, pane history replay, and native agent session restore, handoff tries to keep the current processes alive rather than reconstructing state after the old server stops.
 

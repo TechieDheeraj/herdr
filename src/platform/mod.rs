@@ -3,6 +3,7 @@
 //! Centralizes OS-dependent behavior behind a clean boundary so core
 //! modules don't scatter `#[cfg]` branches through product logic.
 
+pub(crate) mod program_resume;
 #[cfg(unix)]
 pub(crate) mod ssh_agent;
 
@@ -564,6 +565,53 @@ pub(crate) use unix_common::{
     begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
     local_stream_peer_description, spawn_server_signal_monitor, ChildPipe, RemoteBridgeWake,
 };
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn resume_user_uid() -> Option<u32> {
+    agent_session_user_uid().filter(|&uid| uid != 0)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn agent_session_user_uid() -> Option<u32> {
+    // SAFETY: these process identity queries have no preconditions.
+    let (real, effective) = unsafe { (libc::getuid(), libc::geteuid()) };
+    (real == effective).then_some(effective)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(crate) fn agent_session_user_uid() -> Option<u32> {
+    None
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(crate) fn foreground_process_group_id_for_tty_fd(_fd: std::os::fd::RawFd) -> Option<u32> {
+    None
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn resume_user_uid() -> Option<u32> {
+    None
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn resume_owner_uid(_pid: u32) -> Option<u32> {
+    None
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(crate) fn writable_file_paths(_pid: u32) -> Option<Vec<std::path::PathBuf>> {
+    None
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(crate) fn process_started_at(_start_token: u64) -> Option<std::time::SystemTime> {
+    None
+}
+
+#[cfg(unix)]
+pub(crate) fn process_parent_pid(pid: u32) -> Option<u32> {
+    process_name_and_parent(pid).map(|(_, parent)| parent)
+}
 
 mod client_state;
 pub(crate) use client_state::{create_private_state_file, replace_file, sync_parent_directory};

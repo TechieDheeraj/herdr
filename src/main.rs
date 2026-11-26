@@ -23,6 +23,7 @@ mod config;
 mod copy_mode;
 mod detect;
 mod events;
+mod program_resume;
 use ghostty_vt as ghostty;
 mod handoff_runtime;
 mod health;
@@ -400,6 +401,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Resume supported AI-agent panes into their native conversation sessions after
 # a Herdr server restart. Requires official integrations that report session refs.
 # resume_agents_on_restore = true
+# Executables allowed to request OSC 7577 program restore (Linux and macOS).
+# program_resume_allowlist = []
 # Milliseconds between automatic agent restores; 0 starts them without spacing.
 # startup_per_agent_delay_ms = 100
 
@@ -511,6 +514,9 @@ fn finish_cli(outcome: io::Result<cli::CommandOutcome>) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
+    // An enclosing terminal owns this secret. Drop it before starting any
+    // threads, server processes, remote transports, or plugin helpers.
+    std::env::remove_var(program_resume::TOKEN_ENV);
     let raw_args: Vec<String> = match args_as_utf8(std::env::args_os()) {
         Ok(args) => args,
         Err(err) => {

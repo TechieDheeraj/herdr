@@ -30,6 +30,26 @@ pub struct SessionSnapshot {
     pub collapsed_space_keys: std::collections::HashSet<String>,
 }
 
+impl SessionSnapshot {
+    pub(super) fn has_program_resumes(&self) -> bool {
+        self.workspaces
+            .iter()
+            .flat_map(|ws| &ws.tabs)
+            .flat_map(|tab| tab.panes.values())
+            .any(|pane| pane.program_resume.is_some())
+    }
+
+    pub(super) fn discard_program_resumes(&mut self) {
+        for workspace in &mut self.workspaces {
+            for tab in &mut workspace.tabs {
+                for pane in tab.panes.values_mut() {
+                    pane.program_resume = None;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SessionHistorySnapshot {
     /// Format version follows the matching session snapshot version.
@@ -115,8 +135,22 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_resume: Option<PaneAgentResumeSnapshot>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_program_resume"
+    )]
+    pub(crate) program_resume: Option<crate::program_resume::ResumeRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+}
+
+// Discard an unreadable optional record without losing the pane's layout and history.
+fn read_program_resume<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::program_resume::ResumeRecord>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,8 +378,8 @@ fn capture_tab(
     for id in tab.panes.keys() {
         let terminal_id = tab.terminal_id(*id);
         let terminal = terminal_id.and_then(|id| terminals.get(id));
-        let cwd = terminal_id
-            .and_then(|id| terminal_runtimes.get(id))
+        let runtime = terminal_id.and_then(|id| terminal_runtimes.get(id));
+        let cwd = runtime
             .and_then(|runtime| runtime.cwd_for_persistence())
             .or_else(|| terminal.map(|terminal| terminal.cwd.clone()))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
@@ -399,6 +433,7 @@ fn capture_tab(
                 managed_agent_kind,
                 agent_session,
                 agent_resume,
+                program_resume: runtime.and_then(|runtime| runtime.program_resume_record()),
                 launch_argv,
             },
         );
@@ -419,10 +454,41 @@ fn capture_tab(
     }
 }
 
+// Operate on the original JSON to preserve unknown fields in recovery copies
+// and when consuming one-shot commands. Legacy workspaces contain panes directly.
+pub(super) fn strip_program_resumes(value: &mut serde_json::Value) -> bool {
+    let mut stripped = false;
+    if let Some(workspaces) = value.get_mut("workspaces").and_then(|v| v.as_array_mut()) {
+        for ws in workspaces {
+            if let Some(tabs) = ws.get_mut("tabs").and_then(|v| v.as_array_mut()) {
+                for tab in tabs {
+                    stripped |= strip_tab_program_resumes(tab);
+                }
+            } else {
+                stripped |= strip_tab_program_resumes(ws);
+            }
+        }
+    }
+    stripped
+}
+
+fn strip_tab_program_resumes(tab: &mut serde_json::Value) -> bool {
+    let Some(panes) = tab.get_mut("panes").and_then(|v| v.as_object_mut()) else {
+        return false;
+    };
+    let mut stripped = false;
+    for pane in panes.values_mut().filter_map(|v| v.as_object_mut()) {
+        stripped |= pane.remove("program_resume").is_some();
+    }
+    stripped
+}
+
 pub(super) fn layout_fingerprint(snapshot: &SessionSnapshot) -> Option<String> {
     use sha2::{Digest, Sha256};
 
     let mut value = serde_json::to_value(snapshot).ok()?;
+    // Consuming a program report leaves the identity of the saved layout intact.
+    strip_program_resumes(&mut value);
     // Sets serialize as arrays; normalize their order as well as JSON object keys.
     let mut collapsed: Vec<_> = snapshot.collapsed_space_keys.iter().collect();
     collapsed.sort_unstable();
@@ -726,6 +792,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                program_resume: None,
                 launch_argv: None,
             },
         );
@@ -738,6 +805,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                program_resume: None,
                 launch_argv: None,
             },
         );
@@ -1430,6 +1498,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                program_resume: None,
                 launch_argv: None,
             },
         );
@@ -1444,6 +1513,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                program_resume: None,
                 launch_argv: None,
             },
         );

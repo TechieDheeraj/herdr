@@ -286,7 +286,7 @@ herdr pane release-agent <pane_id> \
 
 `--` 之后的参数是服务器重启后 Herdr 为恢复此会话而运行的命令。第一个参数必须是 `PATH` 上的普通命令名,并且任何参数都不能包含撇号。
 
-当官方集成上报了原生会话引用时,`pane get`、`pane list`、`agent get` 和 `agent list` 会包含一个只读的 `agent_session` 对象。没有存储原生会话引用时,该字段被省略。
+当 Herdr 已获得原生会话引用（包括实时交接时找回的引用）时,`pane get`、`pane list`、`agent get` 和 `agent list` 会包含一个只读的 `agent_session` 对象。没有存储原生会话引用时,该字段被省略。
 
 当 Herdr 能解析控制窗格的前台进程的 cwd 时,这些命令会包含 `foreground_cwd`。已有的 `cwd` 字段仍然是用于标签和 follow-cwd 行为的窗格/工作区 cwd。
 

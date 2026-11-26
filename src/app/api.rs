@@ -46,7 +46,7 @@ impl App {
                 self.handle_api_worktree_read_finished(*result);
                 changes_workspace
             }
-            ev @ AppEvent::TerminalBell { .. } => {
+            ev @ (AppEvent::ProgramResumeChanged { .. } | AppEvent::TerminalBell { .. }) => {
                 self.handle_internal_event(ev);
                 false
             }
@@ -107,6 +107,7 @@ impl App {
     ) -> Vec<crate::app::actions::PaneStateUpdate> {
         let mut worktree_restore_failed = false;
         let ev = match ev {
+            ev @ AppEvent::ProgramResumeChanged { .. } => return self.state.handle_app_event(ev),
             AppEvent::WorktreeRuntimeRestoreFailed {
                 pane_id,
                 operation_id,

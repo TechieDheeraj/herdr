@@ -154,7 +154,8 @@ fn preserve_existing_in(path: &Path, directory_name: &str, keep: usize) -> io::R
             "session-{timestamp:039}-{}-{sequence}.json",
             std::process::id()
         ));
-        match copy_recovery(&mut source, &backup) {
+        let private = crate::platform::program_resume::private_snapshot(&source);
+        match copy_recovery(&mut source, &backup, private) {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(err),
@@ -185,7 +186,7 @@ fn preserve_existing_in(path: &Path, directory_name: &str, keep: usize) -> io::R
     ))
 }
 
-fn copy_recovery(source: &mut impl io::Read, backup: &Path) -> io::Result<()> {
+fn copy_recovery(source: &mut impl io::Read, backup: &Path, private: bool) -> io::Result<()> {
     let directory = backup.parent().unwrap_or_else(|| Path::new("."));
     let pending = backup.with_extension("pending");
     let mut output = crate::platform::create_config_temporary(&pending, true)?;
@@ -201,7 +202,11 @@ fn copy_recovery(source: &mut impl io::Read, backup: &Path) -> io::Result<()> {
                 ))
             }
         }
-        io::copy(source, &mut output)?;
+        if private {
+            io::copy(source, &mut output)?;
+        } else {
+            copy_untrusted_recovery(source, &mut output)?;
+        }
         output.sync_all()?;
         drop(output);
         std::fs::rename(&pending, backup)?;
@@ -216,6 +221,20 @@ fn copy_recovery(source: &mut impl io::Read, backup: &Path) -> io::Result<()> {
         }
     }
     result
+}
+
+// A private recovery copy must not confer trust on a record from a shared file.
+// Keep otherwise recoverable data, including unknown fields and legacy layouts.
+fn copy_untrusted_recovery(source: &mut impl io::Read, output: &mut File) -> io::Result<()> {
+    use io::Write;
+    let mut bytes = Vec::new();
+    source.read_to_end(&mut bytes)?;
+    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        if super::snapshot::strip_program_resumes(&mut value) {
+            return serde_json::to_writer_pretty(output, &value).map_err(io::Error::other);
+        }
+    }
+    output.write_all(&bytes)
 }
 
 fn recovery_files(directory: &Path) -> io::Result<Vec<(u128, PathBuf)>> {
@@ -449,6 +468,26 @@ mod tests {
         std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn recovery_copies_cannot_promote_shared_program_records() {
+        use std::os::unix::fs::PermissionsExt;
+        let writer = writer(true);
+        let mut value = serde_json::to_value(snapshot()).unwrap();
+        let pane = &mut value["workspaces"][0]["tabs"][0]["panes"]["1"];
+        pane["program_resume"] = serde_json::json!({"uid":42, "argv":["program"], "cwd":"/"});
+        pane["future_field"] = serde_json::json!("preserved");
+        std::fs::write(&writer.path, serde_json::to_vec(&value).unwrap()).unwrap();
+        std::fs::set_permissions(&writer.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(preserve_existing(&writer.path).unwrap());
+        let files = backups(&writer);
+        let recovered: serde_json::Value = serde_json::from_slice(&files[0]).unwrap();
+        let pane = &recovered["workspaces"][0]["tabs"][0]["panes"]["1"];
+        assert!(pane.get("program_resume").is_none());
+        assert_eq!(pane["future_field"], "preserved");
+        std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn healthy_and_fresh_sessions_save_and_clear_without_backups() {
         for protect_unloaded in [false, true] {
@@ -552,12 +591,15 @@ mod tests {
     fn repeated_failed_saves_do_not_replace_a_completed_recovery_copy() {
         let mut writer = writer(true);
         std::fs::write(&writer.path, b"original").unwrap();
-        let temporary = writer.path.with_extension("json.tmp");
-        std::fs::create_dir(&temporary).unwrap();
+        writer.preserve_unloaded().unwrap();
+        // Simulate a target which cannot be atomically replaced.
+        std::fs::remove_file(&writer.path).unwrap();
+        std::fs::create_dir(&writer.path).unwrap();
         writer.save(&snapshot(), None);
         writer.save(&snapshot(), None);
-        assert_eq!(std::fs::read(&writer.path).unwrap(), b"original");
-        std::fs::remove_dir(&temporary).unwrap();
+        assert!(writer.path.is_dir());
+        assert_eq!(backups(&writer), vec![b"original".to_vec()]);
+        std::fs::remove_dir(&writer.path).unwrap();
         writer.save(&snapshot(), None);
         assert_eq!(backups(&writer), vec![b"original".to_vec()]);
         std::fs::remove_dir_all(writer.path.parent().unwrap()).unwrap();
@@ -578,7 +620,7 @@ mod tests {
             .with_file_name("session-000000000000000000000000000000000000001-1-0.json");
         let mut source = io::Cursor::new(b"partial").chain(Interrupted);
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            copy_recovery(&mut source, &backup)
+            copy_recovery(&mut source, &backup, true)
         }))
         .is_err());
         assert!(

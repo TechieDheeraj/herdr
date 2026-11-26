@@ -28,7 +28,9 @@ pub(crate) use super::unix_common::{
 };
 
 mod bootstrap;
+mod writable_files;
 pub(crate) use bootstrap::{configure_server_daemon_context, prepare_server_process};
+pub(crate) use writable_files::writable_file_paths;
 
 mod shutdown;
 pub(crate) use shutdown::monitor_host_shutdown;
@@ -62,6 +64,33 @@ pub(crate) fn write_existing_config(
 ) -> std::io::Result<bool> {
     // Unix keeps atomic replacement for existing files too.
     Ok(false)
+}
+
+pub(super) fn file_has_no_extended_acl(fd: std::os::fd::RawFd) -> bool {
+    // Darwin extended ACLs can grant access independently of the mode bits.
+    // These libc functions from <sys/acl.h> are absent from the Rust bindings.
+    unsafe extern "C" {
+        fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
+        fn acl_get_entry(
+            acl: *mut libc::c_void,
+            index: libc::c_int,
+            entry: *mut *mut libc::c_void,
+        ) -> libc::c_int;
+        fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+    }
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x100;
+    const ACL_FIRST_ENTRY: libc::c_int = 0;
+    // A live file descriptor returns ENOENT when no extended ACL is attached.
+    let acl = unsafe { acl_get_fd_np(fd, ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT);
+    }
+    let mut entry = std::ptr::null_mut();
+    // A valid, empty ACL has no first entry (EINVAL).
+    let empty = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) } == -1
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL);
+    unsafe { acl_free(acl) };
+    empty
 }
 
 pub(crate) fn create_config_temporary(
@@ -1260,6 +1289,10 @@ pub fn process_start_token(pid: u32) -> Option<u64> {
     process_bsdinfo(pid).map(|info| bsdinfo_start_token(&info))
 }
 
+pub(crate) fn process_started_at(start_token: u64) -> Option<std::time::SystemTime> {
+    std::time::UNIX_EPOCH.checked_add(Duration::from_micros(start_token))
+}
+
 /// Process group of `pid` while that same process, matched by its start
 /// token, is alive on the terminal of the pane shell `shell_pid`. A stopped or
 /// backgrounded job still counts.
@@ -1270,6 +1303,11 @@ pub fn live_pane_process_group(shell_pid: u32, pid: u32, start_token: u64) -> Op
         && bsdinfo_start_token(&process) == start_token
         && process.e_tdev == shell.e_tdev)
         .then_some(process.pbi_pgid)
+}
+
+pub(crate) fn resume_owner_uid(pid: u32) -> Option<u32> {
+    let info = process_bsdinfo(pid)?;
+    Some(info.pbi_uid)
 }
 
 fn bsdinfo_start_token(info: &libc::proc_bsdinfo) -> u64 {

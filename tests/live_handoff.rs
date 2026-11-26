@@ -1455,6 +1455,165 @@ fn live_handoff_accepts_canonical_pane_id_from_child_env() {
 }
 
 #[test]
+fn live_handoff_recovers_only_the_conversation_owned_by_each_foreground_agent() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config = base.join("config");
+    let runtime = base.join("runtime");
+    let socket = runtime.join("herdr.sock");
+    let codex_home = base.join("codex-home");
+    let sessions = codex_home.join("sessions/2026/01/01");
+    fs::create_dir_all(&sessions).unwrap();
+
+    let first = "01234567-89ab-cdef-0123-456789abcdef";
+    let second = "01234567-89ab-cdef-0123-456789abcdee";
+    let child = "01234567-89ab-cdef-0123-456789abcded";
+    let shared = "01234567-89ab-cdef-0123-456789abcdec";
+    let rollout = |id| sessions.join(format!("rollout-2026-01-01T00-00-00-{id}.jsonl"));
+    for (id, source) in [
+        (first, "cli"),
+        (second, "cli"),
+        (child, "subagent"),
+        (shared, "cli"),
+    ] {
+        let meta = serde_json::json!({"type":"session_meta", "payload":{"source":source, "id":id}});
+        fs::write(rollout(id), format!("{meta}\n")).unwrap();
+    }
+    let claude_home = base.join("claude-home");
+    let project = claude_home.join("projects/same-project");
+    fs::create_dir_all(&project).unwrap();
+    let claude_transcript = project.join(format!("{first}.jsonl"));
+    let copilot_home = base.join("copilot-home");
+    let copilot_session = copilot_home.join("session-state").join(second);
+    fs::create_dir_all(&copilot_session).unwrap();
+    fs::write(copilot_session.join("events.jsonl"), "").unwrap();
+    let server = spawn_server_with_env(
+        &config,
+        &runtime,
+        &socket,
+        &[
+            ("HERDR_SESSION", "handoff-recovery"),
+            ("CODEX_HOME", codex_home.to_str().unwrap()),
+            ("CLAUDE_CONFIG_DIR", claude_home.to_str().unwrap()),
+            ("COPILOT_HOME", copilot_home.to_str().unwrap()),
+        ],
+    );
+    wait_for_socket(&socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime);
+    let pane = |id: &str| {
+        request(
+            &socket,
+            serde_json::json!({"id":"get","method":"pane.get","params":{"pane_id":id}}),
+        )
+    };
+    let mut panes = Vec::new();
+    // A shared working directory, a read-only reader, two candidate IDs in one
+    // pane, and the same ID in two panes must not cause cross-pane attribution.
+    for (kind, descriptors, expected) in [
+        (
+            "codex",
+            format!(
+                "3>>{} 4>>{}",
+                rollout(first).display(),
+                rollout(child).display()
+            ),
+            Some(first),
+        ),
+        (
+            "codex",
+            format!("3>>{}", rollout(second).display()),
+            Some(second),
+        ),
+        ("codex", format!("3<{}", rollout(first).display()), None),
+        ("codex", format!("3>>{}", rollout(shared).display()), None),
+        ("codex", format!("3>>{}", rollout(shared).display()), None),
+        (
+            "codex",
+            format!(
+                "3>>{} 4>>{}",
+                rollout(first).display(),
+                rollout(second).display()
+            ),
+            None,
+        ),
+        (
+            "claude",
+            format!("3>>{}", claude_transcript.display()),
+            Some(first),
+        ),
+        ("copilot", String::new(), Some(second)),
+    ] {
+        let workspace = request(
+            &socket,
+            serde_json::json!({"id":"create","method":"workspace.create","params":{"cwd":base, "focus":false}}),
+        );
+        let id = workspace["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let cmd = format!("/bin/bash -c 'exec -a {kind} /bin/cat' {descriptors}");
+        assert_ok(request(
+            &socket,
+            serde_json::json!({"id":"run","method":"pane.send_input","params":{"pane_id":id,"text":cmd,"keys":["Enter"]}}),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let response = pane(&id);
+            if response["result"]["pane"]["agent"] == kind {
+                assert!(response["result"]["pane"]["agent_session"].is_null());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "foreground fixture was not detected: {response}"
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+        if kind == "copilot" {
+            let info = request(
+                &socket,
+                serde_json::json!({"id":"procs", "method":"pane.process_info", "params":{"pane_id": id}}),
+            );
+            let pid = info["result"]["process_info"]["foreground_process_group_id"]
+                .as_u64()
+                .unwrap();
+            fs::write(copilot_session.join(format!("inuse.{pid}.lock")), "").unwrap();
+        }
+        panes.push((id, expected));
+    }
+    assert_ok(request(
+        &socket,
+        serde_json::json!({"id":"handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(server);
+    wait_for_api(&socket, Duration::from_secs(10));
+    for (id, expected) in &panes {
+        let response = pane(id);
+        assert_eq!(
+            response["result"]["pane"]["agent_session"]["value"].as_str(),
+            *expected,
+            "pane {id}: {response}"
+        );
+    }
+    let snapshot = config.join("herdr-dev/sessions/handoff-recovery/session.json");
+    let saved: serde_json::Value = serde_json::from_slice(&fs::read(snapshot).unwrap()).unwrap();
+    let ids = saved["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|ws| ws["tabs"].as_array().unwrap())
+        .flat_map(|tab| tab["panes"].as_object().unwrap().values())
+        .filter_map(|pane| pane["agent_session"]["value"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, [first, second, first, second]);
+    assert_ok(request(
+        &socket,
+        serde_json::json!({"id":"stop","method":"server.stop","params":{}}),
+    ));
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     use std::os::unix::fs::PermissionsExt;
 

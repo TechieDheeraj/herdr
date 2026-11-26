@@ -168,6 +168,7 @@ pub(crate) struct ProcessBytesResult {
     pub terminal_title_changed: bool,
     pub terminal_bells: u16,
     pub clipboard_writes: Vec<Vec<u8>>,
+    pub program_resume_reports: Vec<Vec<u8>>,
     pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
 }
@@ -187,6 +188,7 @@ pub(crate) enum TerminalCompressionStep {
 
 pub(crate) struct GhosttyPaneTerminal {
     pub core: Mutex<GhosttyPaneCore>,
+    pub(super) program_resume: Option<Arc<Mutex<crate::program_resume::ProgramResume>>>,
     #[cfg(test)]
     pub(super) scroll_metrics_reads: std::sync::atomic::AtomicUsize,
     #[cfg(all(test, unix))]
@@ -1177,6 +1179,7 @@ impl GhosttyPaneTerminal {
             crate::ghostty::KeyEncoder::new().map_err(|e| std::io::Error::other(e.to_string()))?;
         configure_key_encoder(&mut key_encoder, &terminal);
         Ok(Self {
+            program_resume: None,
             #[cfg(test)]
             scroll_metrics_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(all(test, unix))]
@@ -1366,6 +1369,7 @@ impl GhosttyPaneTerminal {
                 terminal_title_changed: false,
                 terminal_bells: 0,
                 clipboard_writes: Vec::new(),
+                program_resume_reports: Vec::new(),
                 reported_cwd: None,
                 terminal_responses: Vec::new(),
             };
@@ -1396,7 +1400,14 @@ impl GhosttyPaneTerminal {
                 "agent OSC evidence observed"
             );
         }
-        let terminal_title_changed = core.agent_osc_state.observe(bytes);
+        let mut program_resume_reports = Vec::new();
+        let terminal_title_changed =
+            core.agent_osc_state
+                .observe_with_program_resume(bytes, |body| {
+                    if self.program_resume.is_some() {
+                        program_resume_reports.push(body.to_vec());
+                    }
+                });
 
         core.kitty_keyboard.observe(bytes);
         let mut terminal_responses = Vec::new();
@@ -1483,6 +1494,7 @@ impl GhosttyPaneTerminal {
             terminal_title_changed,
             terminal_bells,
             clipboard_writes,
+            program_resume_reports,
             reported_cwd,
             terminal_responses,
         }
@@ -4237,6 +4249,41 @@ mod tests {
         let result = pane.process_pty_bytes(PaneId::from_raw(1), 0, b"live output", &tx);
 
         assert!(result.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn program_resume_collects_only_complete_live_reports_in_order() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 100).unwrap();
+        let mut pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let id = PaneId::from_raw(1);
+        assert!(pane
+            .process_pty_bytes(id, 0, b"\x1b]7577;disabled\x07", &tx)
+            .program_resume_reports
+            .is_empty());
+        // Use the same verifier shape as a live handoff, independent of machine policy.
+        pane.program_resume = Some(Arc::new(Mutex::new(
+            serde_json::from_value(serde_json::json!({
+                "token": "example-for-framing-test", "active": null, "last_time": {}
+            }))
+            .unwrap(),
+        )));
+        pane.seed_history_ansi("\x1b]7577;history\x07");
+        let partial =
+            pane.process_pty_bytes(id, 0, b"\x1bP\x1b]7577;nested\x07\x1b\\\x1b]7577;fi", &tx);
+        assert!(partial.program_resume_reports.is_empty());
+        let complete =
+            pane.process_pty_bytes(id, 0, b"rst\x1b\\\x1b]2;title\x07\x1b]7577;second\x07", &tx);
+        assert!(complete.terminal_title_changed);
+        assert_eq!(
+            complete.program_resume_reports,
+            [b"first".as_slice(), b"second"]
+        );
+        let mut oversized = b"\x1b]7577;".to_vec();
+        oversized.extend(std::iter::repeat_n(b'x', 4097));
+        oversized.extend_from_slice(b"\x07\x1b]7577;ok\x07");
+        let recovered = pane.process_pty_bytes(id, 0, &oversized, &tx);
+        assert_eq!(recovered.program_resume_reports, [b"ok"]);
     }
 
     #[test]

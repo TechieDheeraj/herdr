@@ -96,7 +96,7 @@ pub(super) fn render_row_color_overlay(
         *apply,
         " ↵ apply ",
         Style::default()
-            .fg(contrast(p))
+            .fg(p.accent_foreground())
             .bg(p.accent)
             .add_modifier(Modifier::BOLD),
     );

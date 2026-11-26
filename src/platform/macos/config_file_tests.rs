@@ -25,6 +25,9 @@ fn config_replacement_preserves_macos_acl() {
     };
     let original = acl(&source);
     assert!(original.contains("everyone deny execute"));
+    use std::os::fd::AsRawFd;
+    let source_fd = std::fs::File::open(&source).unwrap();
+    assert!(!file_has_no_extended_acl(source_fd.as_raw_fd()));
     assert!(Command::new("chmod")
         .args(["+a", "everyone allow read,file_inherit"])
         .arg(&dir)
@@ -36,6 +39,8 @@ fn config_replacement_preserves_macos_acl() {
         acl(&temporary).is_empty(),
         "staging must not inherit allow ACEs"
     );
+    let temporary_fd = std::fs::File::open(&temporary).unwrap();
+    assert!(file_has_no_extended_acl(temporary_fd.as_raw_fd()));
     write_config_temporary(Some(&source), &temporary, b"new").unwrap();
     assert_eq!(acl(&temporary), original);
     assert_eq!(std::fs::read(&source).unwrap(), b"original");

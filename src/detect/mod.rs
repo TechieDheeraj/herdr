@@ -378,7 +378,7 @@ pub fn pane_shell_is_idle(child_pid: u32) -> bool {
     crate::platform::available_pane_shell(child_pid).is_some()
 }
 
-fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> String {
+pub(crate) fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> String {
     let effective = process.argv0.as_deref().unwrap_or(&process.name);
     let lower_effective = effective.to_lowercase();
 

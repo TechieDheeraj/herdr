@@ -35,7 +35,14 @@ struct PaneRestoreStartup<'a> {
     reserved_agent_session: Option<String>,
 }
 
+impl PaneRestoreStartup<'_> {
+    fn allows_program_resume(&self, cold_start: bool) -> bool {
+        cold_start && self.restore_plan.is_none() && !self.duplicate_agent_session
+    }
+}
+
 struct RestoreRuntimeContext<'a> {
+    cold_start: bool,
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'a>,
     resume_agents_on_restore: bool,
@@ -204,13 +211,16 @@ fn restore_with_imports_strict(
         history,
         rows,
         cols,
-        scrollback_limit_bytes,
-        shell_config,
-        resume_agents_on_restore,
+        &RestoreRuntimeContext {
+            cold_start: false,
+            scrollback_limit_bytes,
+            shell_config,
+            resume_agents_on_restore,
+            events,
+            render_notify,
+            render_dirty,
+        },
         imported_panes,
-        events,
-        render_notify,
-        render_dirty,
     );
     if failed_imports > 0 {
         return Err(std::io::Error::other(format!(
@@ -244,13 +254,16 @@ fn restore_with_imports(
         history,
         rows,
         cols,
-        scrollback_limit_bytes,
-        shell_config,
-        resume_agents_on_restore,
+        &RestoreRuntimeContext {
+            cold_start: true,
+            scrollback_limit_bytes,
+            shell_config,
+            resume_agents_on_restore,
+            events,
+            render_notify,
+            render_dirty,
+        },
         imported_panes,
-        events,
-        render_notify,
-        render_dirty,
     )
     .0
 }
@@ -260,13 +273,8 @@ fn restore_with_imports_and_failures(
     history: Option<&SessionHistorySnapshot>,
     rows: u16,
     cols: u16,
-    scrollback_limit_bytes: usize,
-    shell_config: crate::pane::PaneShellConfig<'_>,
-    resume_agents_on_restore: bool,
+    runtime_context: &RestoreRuntimeContext<'_>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
-    events: mpsc::Sender<AppEvent>,
-    render_notify: Arc<Notify>,
-    render_dirty: Arc<RenderSignal>,
 ) -> RestoreFailures<RestoredSession> {
     let history = history.filter(|history| {
         let matches = history.layout_fingerprint.is_some()
@@ -282,20 +290,12 @@ fn restore_with_imports_and_failures(
     let mut resumed_agent_sessions = HashSet::new();
     let mut failed_imports = 0;
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
-        let runtime_context = RestoreRuntimeContext {
-            scrollback_limit_bytes,
-            shell_config,
-            resume_agents_on_restore,
-            events: events.clone(),
-            render_notify: render_notify.clone(),
-            render_dirty: render_dirty.clone(),
-        };
         let (restored, workspace_failed_imports) = restore_workspace(
             ws_snap,
             history.and_then(|history| history.workspaces.get(idx)),
             rows,
             cols,
-            &runtime_context,
+            runtime_context,
             &mut resumed_agent_sessions,
             imported_panes,
         );
@@ -544,24 +544,7 @@ fn restore_tab(
             .map(|p| p.cwd.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
 
-        let cwd = saved_cwd;
         let has_import = old_id.is_some_and(|old_id| imported_panes.contains_key(old_id));
-        if !has_import && !cwd.is_dir() {
-            let terminal = unavailable_restored_terminal(
-                saved_pane,
-                cwd,
-                "Saved directory is unavailable. Restore the directory and restart this session."
-                    .into(),
-            );
-            let auto_name_number = auto_pane_numbers.get(id).copied().unwrap_or(1);
-            panes.insert(
-                *id,
-                PaneState::new(terminal.id.clone()).with_auto_name_number(auto_name_number),
-            );
-            terminals.push(terminal);
-            continue;
-        }
-
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_managed_agent = saved_pane
@@ -580,11 +563,39 @@ fn restore_tab(
             pane_restore_startup(
                 saved_agent_session,
                 saved_agent_resume,
-                &cwd,
+                &saved_cwd,
                 saved_history,
                 &mut agent_restore,
             )
         };
+        let program_resume = saved_pane
+            .filter(|_| startup.allows_program_resume(runtime_context.cold_start && !has_import))
+            .and_then(|pane| pane.program_resume.as_ref())
+            .and_then(|record| Some((record, record.restore_cwd()?)));
+        let cwd = program_resume
+            .as_ref()
+            .map(|(_, cwd)| cwd.clone())
+            .unwrap_or(saved_cwd);
+        if !has_import && !cwd.is_dir() {
+            // The missing pane never consumed its native session.
+            if let Some(key) = startup.reserved_agent_session.as_deref() {
+                resumed_agent_sessions.remove(key);
+            }
+            let terminal = unavailable_restored_terminal(
+                saved_pane,
+                cwd,
+                "Saved directory is unavailable. Restore the directory and restart this session."
+                    .into(),
+            );
+            let auto_name_number = auto_pane_numbers.get(id).copied().unwrap_or(1);
+            panes.insert(
+                *id,
+                PaneState::new(terminal.id.clone()).with_auto_name_number(auto_name_number),
+            );
+            terminals.push(terminal);
+            continue;
+        }
+
         let restored_agent_resume = saved_agent_resume
             .filter(|_| !startup.duplicate_agent_session)
             .map(reported_resume_from_snapshot);
@@ -610,6 +621,10 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
+        #[cfg(unix)]
+        let handoff_respawn_shell = imported_runtime
+            .as_ref()
+            .is_some_and(|imported| imported.state.respawn_shell_on_exit);
         #[cfg(unix)]
         let handoff_agent_state = imported_runtime
             .as_ref()
@@ -665,63 +680,75 @@ fn restore_tab(
             continue;
         }
 
-        let runtime_result = {
-            #[cfg(unix)]
-            if let Some(imported) = imported_runtime {
-                TerminalRuntime::from_handoff_fd(
-                    crate::handoff_runtime::ImportedHandoffRuntime {
-                        master_fd: imported.master_fd,
-                        state: imported.state.with_pane_id(*id),
-                    },
-                    runtime_context.scrollback_limit_bytes,
-                    crate::terminal_theme::TerminalTheme::default(),
-                    None,
-                    runtime_context.events.clone(),
-                    runtime_context.render_notify.clone(),
-                    runtime_context.render_dirty.clone(),
-                )
-            } else {
-                TerminalRuntime::spawn_with_initial_history(
+        let cold_start = || {
+            if let Some((record, _)) = program_resume {
+                match TerminalRuntime::spawn_argv_command(
                     *id,
                     rows,
                     cols,
                     cwd.clone(),
+                    &record.argv,
+                    &launch_env,
+                    crate::pane::AgentDetection::Enabled,
                     runtime_context.scrollback_limit_bytes,
                     crate::terminal_theme::TerminalTheme::default(),
                     None,
-                    runtime_context.shell_config,
-                    &launch_env,
-                    startup.initial_history_ansi,
                     runtime_context.events.clone(),
                     runtime_context.render_notify.clone(),
                     runtime_context.render_dirty.clone(),
-                )
+                ) {
+                    Ok(runtime) => return Ok((runtime, true)),
+                    Err(err) => {
+                        warn!(pane = id.raw(), kind = ?err.kind(), "could not resume program, starting shell")
+                    }
+                }
             }
-
-            #[cfg(not(unix))]
-            {
-                TerminalRuntime::spawn_with_initial_history(
-                    *id,
-                    rows,
-                    cols,
-                    cwd.clone(),
-                    runtime_context.scrollback_limit_bytes,
-                    crate::terminal_theme::TerminalTheme::default(),
-                    None,
-                    runtime_context.shell_config,
-                    &launch_env,
-                    startup.initial_history_ansi,
-                    runtime_context.events.clone(),
-                    runtime_context.render_notify.clone(),
-                    runtime_context.render_dirty.clone(),
-                )
-            }
+            TerminalRuntime::spawn_with_initial_history(
+                *id,
+                rows,
+                cols,
+                cwd.clone(),
+                runtime_context.scrollback_limit_bytes,
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                runtime_context.shell_config,
+                &launch_env,
+                startup.initial_history_ansi,
+                runtime_context.events.clone(),
+                runtime_context.render_notify.clone(),
+                runtime_context.render_dirty.clone(),
+            )
+            .map(|runtime| (runtime, false))
         };
 
+        #[cfg(unix)]
+        let runtime_result = if let Some(imported) = imported_runtime {
+            TerminalRuntime::from_handoff_fd(
+                crate::handoff_runtime::ImportedHandoffRuntime {
+                    master_fd: imported.master_fd,
+                    state: imported.state.with_pane_id(*id),
+                },
+                runtime_context.scrollback_limit_bytes,
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                runtime_context.events.clone(),
+                runtime_context.render_notify.clone(),
+                runtime_context.render_dirty.clone(),
+            )
+            .map(|runtime| (runtime, handoff_respawn_shell))
+        } else {
+            cold_start()
+        };
+        #[cfg(not(unix))]
+        let runtime_result = cold_start();
+
         match runtime_result {
-            Ok(runtime) => {
+            Ok((runtime, respawn_shell)) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                if respawn_shell {
+                    terminal = terminal.with_respawn_shell_on_exit();
+                }
                 if was_imported {
                     if let Some(argv) = saved_launch_argv {
                         terminal = terminal.with_launch_argv(argv).with_respawn_shell_on_exit();
@@ -1288,6 +1315,7 @@ mod tests {
         assert!(startup.restore_plan.is_some());
         assert!(startup.initial_history_ansi.is_none());
         assert!(!startup.duplicate_agent_session);
+        assert!(!startup.allows_program_resume(true));
     }
 
     #[test]
@@ -1328,6 +1356,7 @@ mod tests {
         assert!(duplicate.restore_plan.is_none());
         assert!(duplicate.initial_history_ansi.is_none());
         assert!(duplicate.duplicate_agent_session);
+        assert!(!duplicate.allows_program_resume(true));
     }
 
     #[test]
@@ -1433,6 +1462,8 @@ mod tests {
         assert_eq!(startup.initial_history_ansi, Some("RESTORED_HISTORY\r\n"));
         assert!(!startup.duplicate_agent_session);
         assert!(resumed.is_empty());
+        assert!(startup.allows_program_resume(true));
+        assert!(!startup.allows_program_resume(false));
     }
 
     #[test]
@@ -1625,6 +1656,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             agent_resume: None,
+                            program_resume: None,
                             launch_argv: None,
                         },
                     )]),
@@ -1710,6 +1742,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
+                                program_resume: None,
                                 launch_argv: None,
                             },
                         ),
@@ -1722,6 +1755,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 agent_resume: None,
+                                program_resume: None,
                                 launch_argv: None,
                             },
                         ),
@@ -1802,6 +1836,7 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     agent_resume: None,
+                    program_resume: None,
                     launch_argv: None,
                 },
             )
@@ -1818,6 +1853,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             agent_resume: None,
+            program_resume: None,
             launch_argv: None,
         };
         let snapshot = SessionSnapshot {
@@ -1983,6 +2019,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             agent_resume: None,
+                            program_resume: None,
                             launch_argv: None,
                         },
                     )]),
@@ -2197,6 +2234,80 @@ mod tests {
         let _ = runtime.try_send_bytes(bytes::Bytes::from_static(b"exit\n"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn program_resume_cold_restore_preserves_arguments_and_falls_back_to_shell() {
+        let Some(uid) = crate::platform::resume_user_uid() else {
+            return;
+        };
+        // Each server owns one allowlist. Isolate it from other in-process app tests.
+        const CHILD: &str = "HERDR_TEST_PROGRAM_RESTORE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "persist::restore::tests::program_resume_cold_restore_preserves_arguments_and_falls_back_to_shell", "--nocapture"])
+                .env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let cwd = std::env::temp_dir();
+        let missing = cwd.join(format!("herdr-no-program-{}", std::process::id()));
+        let printer = "/usr/bin/printf";
+        crate::program_resume::set_allowlist(&[printer.into(), missing.to_str().unwrap().into()]);
+        for available in [true, false] {
+            let (mut snapshot, _) = snapshot_with_saved_pane_history();
+            let pane = snapshot.workspaces[0].tabs[0].panes.get_mut(&0).unwrap();
+            // A program can choose a different directory from the pane's last one.
+            pane.cwd = missing.clone();
+            let program = if available {
+                printer
+            } else {
+                missing.to_str().unwrap()
+            };
+            pane.program_resume = Some(
+                serde_json::from_value(serde_json::json!({
+                    "uid": uid, "cwd": cwd, "argv": [program, "[%s]", "a;$HOME", "", "arg'2"],
+                }))
+                .unwrap(),
+            );
+            let (events, _rx) = mpsc::channel(32);
+            let (_, terminals, runtimes) = restore(
+                &snapshot,
+                None,
+                24,
+                80,
+                4096,
+                "/bin/sh",
+                crate::config::ShellModeConfig::NonLogin,
+                false,
+                events,
+                Arc::new(Notify::new()),
+                Arc::new(RenderSignal::new()),
+            );
+            let terminal = terminals.values().next().unwrap();
+            assert_eq!(terminal.cwd, cwd);
+            assert_eq!(terminal.respawn_shell_on_exit, available);
+            assert!(terminal.launch_argv.is_none());
+            let runtime = runtimes
+                .into_values()
+                .next()
+                .expect("program or fallback shell");
+            if available {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while !runtime
+                    .recent_unwrapped_text(10)
+                    .contains("[a;$HOME][][arg'2]")
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "literal arguments did not reach printf"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+            runtime.shutdown();
+        }
+    }
+
     #[tokio::test]
     async fn restore_without_history_snapshot_keeps_pane_contents_empty() {
         let (snapshot, _history) = snapshot_with_saved_pane_history();
@@ -2290,6 +2401,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 agent_resume: None,
+                program_resume: None,
                 launch_argv: None,
             },
         );

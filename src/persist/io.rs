@@ -1,5 +1,6 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::warn;
 
@@ -52,8 +53,7 @@ fn save_json_to_path<T: serde::Serialize>(path: &Path, snapshot: &T) -> std::io:
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(snapshot)?;
-    let tmp_path = target.with_extension("json.tmp");
-    let mut temporary = std::fs::File::create(&tmp_path)?;
+    let (tmp_path, mut temporary) = private_temporary(&target)?;
     // A rename can survive a hard crash before unflushed file contents reach disk.
     let result = temporary
         .write_all(json.as_bytes())
@@ -64,6 +64,23 @@ fn save_json_to_path<T: serde::Serialize>(path: &Path, snapshot: &T) -> std::io:
         return Err(err);
     }
     crate::platform::sync_parent_directory(target.parent().unwrap_or_else(|| Path::new(".")))
+}
+
+fn private_temporary(target: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..128 {
+        let n = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = target.with_file_name(format!(".herdr-session-{}-{n}.tmp", std::process::id()));
+        match crate::platform::create_config_temporary(&path, true) {
+            Ok(file) => return Ok((path, file)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate session staging file",
+    ))
 }
 
 pub(super) fn save_history_to_path(
@@ -91,10 +108,23 @@ pub fn clear_history() {
     }
 }
 
+pub fn load_for_restore() -> Option<SessionSnapshot> {
+    load_from_path(&session_path(), true)
+}
+
+#[cfg(test)]
 pub fn load() -> Option<SessionSnapshot> {
-    let path = session_path();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
+    load_from_path(&session_path(), false)
+}
+
+fn load_from_path(path: &Path, consume: bool) -> Option<SessionSnapshot> {
+    let (content, private) = match std::fs::File::open(path).and_then(|mut file| {
+        let private = crate::platform::program_resume::private_snapshot(&file);
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        Ok((content, private))
+    }) {
+        Ok(contents) => contents,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!(
                 event = "persist.restore", subsystem = "persist", outcome = "missing",
@@ -111,7 +141,20 @@ pub fn load() -> Option<SessionSnapshot> {
         }
     };
     match parse_snapshot(&content) {
-        Ok(snapshot) => Some(snapshot),
+        Ok(mut snapshot) => {
+            if !private {
+                snapshot.discard_program_resumes();
+            }
+            if consume && snapshot.has_program_resumes() {
+                // Once a program starts, a crash must not replay its old command.
+                // Commit the removal before making any launch intent available.
+                if let Err(err) = consume_program_resumes(path, &content) {
+                    warn!(%err, path = %path.display(), "could not consume program resume records");
+                    snapshot.discard_program_resumes();
+                }
+            }
+            Some(snapshot)
+        }
         Err(err) => {
             if let Some(version) = snapshot_file_version(&content) {
                 if version > SNAPSHOT_VERSION {
@@ -130,6 +173,16 @@ pub fn load() -> Option<SessionSnapshot> {
             None
         }
     }
+}
+
+fn consume_program_resumes(path: &Path, content: &str) -> std::io::Result<()> {
+    let mut value = serde_json::from_str(content)?;
+    if !super::snapshot::strip_program_resumes(&mut value) {
+        return Err(std::io::Error::other(
+            "could not locate saved program resumes",
+        ));
+    }
+    save_json_to_path(path, &value)
 }
 
 pub fn load_history() -> Option<SessionHistorySnapshot> {
@@ -234,12 +287,95 @@ mod tests {
         assert!(history.contains("split-secret"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn only_private_session_files_restore_program_records() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let path = temp_session_path("private-programs");
+        let mut snapshot = parse_snapshot(include_str!(
+            "../../tests/fixtures/session/current-herdr-session.json"
+        ))
+        .unwrap();
+        let pane = snapshot.workspaces[0].tabs[0].panes.get_mut(&1).unwrap();
+        pane.program_resume = Some(
+            serde_json::from_value(serde_json::json!({
+                "uid": 1001, "cwd": "/tmp", "argv": ["editor", "literal argument"],
+            }))
+            .unwrap(),
+        );
+        save_to_path(&path, &snapshot).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o077, 0);
+        let restored = load_from_path(&path, false).unwrap();
+        assert!(restored.workspaces[0].tabs[0].panes[&1]
+            .program_resume
+            .is_some());
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let shared = load_from_path(&path, false).unwrap();
+        assert_eq!(shared.workspaces.len(), restored.workspaces.len());
+        assert!(shared.workspaces[0].tabs[0].panes[&1]
+            .program_resume
+            .is_none());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cold_restore_consumes_records_durably_before_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_session_path("consume-programs");
+        let mut original: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/session/current-herdr-session.json"
+        ))
+        .unwrap();
+        let pane = &mut original["workspaces"][0]["tabs"][0]["panes"]["1"];
+        pane["program_resume"] = serde_json::json!({"uid": 42, "cwd": "/tmp", "argv": ["editor"]});
+        pane["future_metadata"] = serde_json::json!(true);
+        save_json_to_path(&path, &original).unwrap();
+
+        let dir = path.parent().unwrap();
+        if crate::platform::resume_user_uid().is_some() {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let failed = load_from_path(&path, true).unwrap();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(!failed.has_program_resumes());
+        }
+        let first = load_from_path(&path, true).unwrap();
+        assert!(first.has_program_resumes());
+        let next = load_from_path(&path, true).unwrap();
+        assert!(!next.has_program_resumes());
+        assert_eq!(
+            super::super::snapshot::layout_fingerprint(&first),
+            super::super::snapshot::layout_fingerprint(&next)
+        );
+        let mut expected = original;
+        expected["workspaces"][0]["tabs"][0]["panes"]["1"]
+            .as_object_mut()
+            .unwrap()
+            .remove("program_resume");
+        let actual: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(expected, actual);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn failed_replacement_preserves_saved_files_and_retries() {
         use std::os::windows::fs::OpenOptionsExt;
 
         let (session_path, history_path) = temp_session_paths("failed-replacement");
+        let has_staging_file = || {
+            std::fs::read_dir(session_path.parent().unwrap())
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".herdr-session-")
+                })
+        };
         save_to_path(&session_path, &empty_snapshot()).unwrap();
         save_history_to_path(&history_path, Some(&history_snapshot("old history"))).unwrap();
 
@@ -261,11 +397,11 @@ mod tests {
             };
             assert!(save().is_err());
             assert_eq!(std::fs::read(path).unwrap(), original);
-            assert!(!path.with_extension("json.tmp").exists());
+            assert!(!has_staging_file());
 
             drop(locked);
             save().unwrap();
-            assert!(!path.with_extension("json.tmp").exists());
+            assert!(!has_staging_file());
         }
 
         assert_eq!(

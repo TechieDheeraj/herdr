@@ -2231,6 +2231,16 @@ fn publish_reported_cwd(
 }
 
 impl PaneRuntime {
+    pub(crate) fn program_resume_record(&self) -> Option<crate::program_resume::ResumeRecord> {
+        self.terminal
+            .ghostty
+            .program_resume
+            .as_ref()?
+            .lock()
+            .ok()?
+            .record()
+    }
+
     pub fn shutdown(mut self) {
         if let Some(handle) = self.detect_handle.take() {
             handle.abort();
@@ -2311,6 +2321,13 @@ impl PaneRuntime {
             terminal_title: self.terminal_title(),
             initial_history_ansi: None,
             agent_state: None,
+            program_resume: self
+                .terminal
+                .ghostty
+                .program_resume
+                .as_ref()
+                .and_then(|state| state.lock().ok().map(|state| state.clone())),
+            respawn_shell_on_exit: false,
         }
     }
 
@@ -2522,6 +2539,8 @@ impl PaneRuntime {
             terminal_title,
             initial_history_ansi,
             agent_state: _,
+            program_resume,
+            respawn_shell_on_exit: _,
         } = state;
         let pane_id = PaneId::from_raw(pane_id);
         use std::os::fd::FromRawFd;
@@ -2539,7 +2558,8 @@ impl PaneRuntime {
                 .enable_kitty_graphics()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
-        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
+        let mut pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
+        pane_terminal.program_resume = program_resume.map(|state| Arc::new(Mutex::new(state)));
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         let _ = pane_terminal.apply_host_terminal_appearance(host_terminal_appearance);
         pane_terminal.seed_terminal_title(terminal_title);
@@ -2574,6 +2594,11 @@ impl PaneRuntime {
             let detection_content_seq = detection_content_seq.clone();
             let child_pid = child_pid.clone();
             let read_events = events.clone();
+            let mut handle_resume_reports = osc::program_resume_report_handler(
+                pane_id,
+                terminal.ghostty.program_resume.clone(),
+                events.clone(),
+            );
             let reported_cwd = reported_cwd.clone();
             let compression_wake = compression.notifier();
             let rt = tokio::runtime::Handle::current();
@@ -2589,6 +2614,7 @@ impl PaneRuntime {
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
                 drop(_content_write_guard);
+                handle_resume_reports(shell_pid, result.program_resume_reports);
                 compression_wake.wake();
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
                 observe_detection_content_change(bytes, &detection_content_seq);
@@ -2694,7 +2720,7 @@ impl PaneRuntime {
         events: mpsc::Sender<AppEvent>,
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
-        cmd: CommandBuilder,
+        mut cmd: CommandBuilder,
         spawn_error_message: &'static str,
         initial_state: SpawnInitialState<'_>,
         agent_detection: AgentDetection,
@@ -2709,7 +2735,9 @@ impl PaneRuntime {
                 .enable_kitty_graphics()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
-        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
+        let mut pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
+        pane_terminal.program_resume = crate::program_resume::ProgramResume::for_command(&mut cmd)
+            .map(|state| Arc::new(Mutex::new(state)));
         pane_terminal.apply_host_terminal_theme(host_terminal_theme);
         let _ = pane_terminal.apply_host_terminal_appearance(host_terminal_appearance);
         pane_terminal.set_windows_powershell_prompt_cwd_reporting(
@@ -2780,6 +2808,11 @@ impl PaneRuntime {
             let child_pid = child_pid.clone();
             let events = events.clone();
             let reported_cwd = reported_cwd.clone();
+            let mut handle_resume_reports = osc::program_resume_report_handler(
+                pane_id,
+                terminal.ghostty.program_resume.clone(),
+                events.clone(),
+            );
             let compression_wake = compression.notifier();
             let rt = tokio::runtime::Handle::current();
             let on_read = Box::new(move |bytes: &[u8]| {
@@ -2793,6 +2826,7 @@ impl PaneRuntime {
                     terminal.process_pty_bytes(pane_id, shell_pid, bytes, &response_writer);
                 content_seq.fetch_add(1, Ordering::Release);
                 drop(_content_write_guard);
+                handle_resume_reports(shell_pid, result.program_resume_reports);
                 compression_wake.wake();
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
                 if agent_detection == AgentDetection::Enabled {

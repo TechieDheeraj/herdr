@@ -836,6 +836,28 @@ pub fn process_start_token(pid: u32) -> Option<u64> {
     process_job_stat(pid).map(|stat| stat.start_time)
 }
 
+pub(crate) fn process_started_at(start_token: u64) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, SystemTime};
+    // /proc/PID/stat field 22 is in clock ticks since boot. Round the process
+    // start up to the next tick before comparing it with a file creation time.
+    let ticks = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).ok()?;
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if ticks == 0 || unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut now) } != 0 {
+        return None;
+    }
+    let uptime = Duration::new(now.tv_sec.try_into().ok()?, now.tv_nsec.try_into().ok()?);
+    let tick = start_token.checked_add(1)?;
+    SystemTime::now()
+        .checked_sub(uptime)?
+        .checked_add(Duration::new(
+            tick / ticks,
+            ((tick % ticks) * 1_000_000_000 / ticks) as u32,
+        ))
+}
+
 /// Process group of `pid` while that same process, matched by its start
 /// token, is alive in the terminal session of the pane shell `shell_pid`.
 /// A stopped or backgrounded job still counts.
@@ -847,6 +869,40 @@ pub fn live_pane_process_group(shell_pid: u32, pid: u32, start_token: u64) -> Op
         && stat.session == shell_session
         && stat.pgrp > 0)
         .then_some(stat.pgrp as u32)
+}
+
+pub(crate) fn resume_owner_uid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let ids = status.lines().find_map(|line| line.strip_prefix("Uid:"))?;
+    ids.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Query only the supplied process. Never open another process's descriptors.
+pub(crate) fn writable_file_paths(pid: u32) -> Option<Vec<std::path::PathBuf>> {
+    let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(proc.join("fd")).ok()? {
+        let entry = entry.ok()?;
+        let Ok(path) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        if !path.is_absolute() {
+            continue;
+        }
+        let Ok(info) = std::fs::read_to_string(proc.join("fdinfo").join(entry.file_name())) else {
+            continue;
+        };
+        let flags = info
+            .lines()
+            .find_map(|line| line.strip_prefix("flags:"))
+            .and_then(|value| i32::from_str_radix(value.trim(), 8).ok())?;
+        if flags & libc::O_ACCMODE != libc::O_RDONLY
+            && std::fs::read_link(entry.path()).ok().as_ref() == Some(&path)
+        {
+            paths.push(path);
+        }
+    }
+    Some(paths)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

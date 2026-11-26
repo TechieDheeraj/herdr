@@ -421,6 +421,7 @@ impl App {
     ) -> std::io::Result<Self> {
         let prefix_keys = config.prefix_keys();
         crate::kitty_graphics::set_enabled(config.kitty_graphics_enabled());
+        crate::program_resume::set_allowlist(&config.session.program_resume_allowlist);
         let (event_tx, event_rx) = mpsc::channel::<AppEvent>(APP_EVENT_CHANNEL_CAPACITY);
         let render_notify = Arc::new(Notify::new());
         let render_dirty = Arc::new(crate::render_signal::RenderSignal::new());
@@ -428,7 +429,10 @@ impl App {
         // Try to restore previous session
         let mut restored_terminals = std::collections::HashMap::new();
         let mut restored_terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
-        let snapshot = policy.restore_session.then(crate::persist::load).flatten();
+        let snapshot = policy
+            .restore_session
+            .then(crate::persist::load_for_restore)
+            .flatten();
         let mut plugin_installation_leases = crate::plugin_installations::Leases::new();
         let mut plugin_installation_cleanup_allowed = true;
         if policy.persist_plugin_registry {
@@ -958,6 +962,10 @@ impl App {
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
             }
+        }
+
+        if !invalid_section("session") {
+            crate::program_resume::set_allowlist(&config.session.program_resume_allowlist);
         }
 
         if !invalid_section("session")

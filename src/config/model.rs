@@ -268,6 +268,8 @@ pub struct SessionConfig {
     /// Resume supported AI-agent panes into their native conversation sessions
     /// when restoring a Herdr session. Default: true.
     pub resume_agents_on_restore: bool,
+    /// Exact executable names or absolute paths allowed to resume via OSC 7577.
+    pub program_resume_allowlist: Vec<String>,
     /// Milliseconds between automatic agent restores. Zero disables spacing.
     pub startup_per_agent_delay_ms: u32,
 }
@@ -276,6 +278,7 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             resume_agents_on_restore: true,
+            program_resume_allowlist: Vec::new(),
             startup_per_agent_delay_ms: 100,
         }
     }

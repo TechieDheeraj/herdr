@@ -162,6 +162,8 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         .map_err(io::Error::other)?;
 
     let result = rt.block_on(async {
+        let recovered_sessions = loaded_config.config.session.resume_agents_on_restore
+            && crate::persist::handoff_sessions::recover(&mut received.manifest.snapshot, &imports);
         let app = app::App::new_from_handoff(
             &loaded_config.config,
             config::config_diagnostic_summary(&loaded_config.diagnostics),
@@ -202,6 +204,9 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
         server.app.assume_handoff_ownership();
         server.app.unpause_handoff_readers();
         server.pending_handoff_repaint_nudge = true;
+        if recovered_sessions {
+            server.app.save_session_now();
+        }
         if let Err(err) = crate::server::handoff::report_owned(&mut received.stream) {
             warn!(err = %err, "failed to report handoff ownership; continuing as owner");
         }

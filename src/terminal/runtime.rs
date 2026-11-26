@@ -17,6 +17,10 @@ use crate::layout::PaneId;
 pub struct TerminalRuntime(crate::pane::PaneRuntime);
 
 impl TerminalRuntime {
+    pub(crate) fn program_resume_record(&self) -> Option<crate::program_resume::ResumeRecord> {
+        self.0.program_resume_record()
+    }
+
     pub fn shutdown(self) {
         self.0.shutdown();
     }

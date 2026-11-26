@@ -4,13 +4,17 @@
 //! Optional pane screen history is stored separately at `session-history.json`.
 //! Installed plugins are persisted separately at `plugins.json`.
 
+#[cfg(unix)]
+pub(crate) mod handoff_sessions;
 mod io;
 pub mod plugin_registry;
 mod restore;
 mod snapshot;
 mod writer;
 
-pub use self::io::{clear_history, load, load_history};
+#[cfg(test)]
+pub use self::io::load;
+pub use self::io::{clear_history, load_for_restore, load_history};
 pub use self::restore::restore;
 pub(crate) use self::restore::restored_worktree_space_membership;
 #[cfg(unix)]

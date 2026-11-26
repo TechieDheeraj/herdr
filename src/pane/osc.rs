@@ -1,10 +1,73 @@
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
+use tokio::sync::{mpsc, watch};
 use tracing::info;
 
+use crate::events::AppEvent;
 use crate::layout::PaneId;
+use crate::program_resume::ProgramResume;
 
 use super::terminal::GhosttyPaneCore;
+
+/// Keep owner checks and persistence notifications off the terminal-core lock.
+/// Ordinary output never starts a task or takes the resume-state lock.
+pub(super) fn program_resume_report_handler(
+    pane_id: PaneId,
+    state: Option<Arc<Mutex<ProgramResume>>>,
+    events: mpsc::Sender<AppEvent>,
+) -> impl FnMut(u32, Vec<Vec<u8>>) {
+    let runtime = tokio::runtime::Handle::current();
+    let start_monitor = move |state: &Arc<Mutex<ProgramResume>>| {
+        let state = Arc::clone(state);
+        let events = events.clone();
+        let (wake, mut receiver) = watch::channel(());
+        runtime.spawn(async move {
+            let mut has_record = true;
+            loop {
+                let reported = tokio::select! {
+                    result = receiver.changed() => {
+                        if result.is_err() { break; }
+                        true
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if has_record => false,
+                };
+                let changed = {
+                    let Ok(mut state) = state.lock() else { break };
+                    let changed = reported || state.expire_if_dead();
+                    has_record = state.has_record();
+                    changed
+                };
+                if changed && events.send(AppEvent::ProgramResumeChanged { pane_id }).await.is_err() {
+                    break;
+                }
+            }
+        });
+        wake
+    };
+    // A live handoff can import a record even if the program never reports again.
+    let mut monitor = state
+        .as_ref()
+        .filter(|state| state.lock().is_ok_and(|state| state.has_record()))
+        .map(&start_monitor);
+    move |shell_pid, reports| {
+        if reports.is_empty() {
+            return;
+        }
+        let Some(state) = &state else { return };
+        let mut changed = false;
+        if let Ok(mut state) = state.lock() {
+            for report in reports {
+                changed |= state.observe(shell_pid, &report);
+            }
+        }
+        if changed {
+            monitor
+                .get_or_insert_with(|| start_monitor(state))
+                .send_replace(());
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DefaultColorQuery {
@@ -482,9 +545,8 @@ impl OscStreamCollector {
 /// Title text is untrusted model output; cap it to bound memory and log size.
 const AGENT_OSC_MAX_CHARS: usize = 256;
 
-/// Always-on tracker that retains the latest OSC 0/2 title and OSC 9 progress
-/// payload emitted by the child process. Nothing here affects rendering; this
-/// is pure passive capture for the detection engine (Stage C / Stage D).
+/// Retains title and progress evidence and dispatches complete OSC 7577 reports
+/// through the same stream collector. The caller authenticates those reports.
 ///
 /// - `latest_title` — last OSC 0 or OSC 2 payload, sanitized. An empty
 ///   payload (e.g. `\x1b]0;\x07`) clears the stored value.
@@ -499,7 +561,16 @@ pub(super) struct AgentOscStateTracker {
 }
 
 impl AgentOscStateTracker {
-    pub(super) fn observe(&mut self, bytes: &[u8]) -> bool {
+    #[cfg(test)]
+    fn observe(&mut self, bytes: &[u8]) -> bool {
+        self.observe_with_program_resume(bytes, |_| {})
+    }
+
+    pub(super) fn observe_with_program_resume(
+        &mut self,
+        bytes: &[u8],
+        mut program_resume: impl FnMut(&[u8]),
+    ) -> bool {
         let (collector, latest_title, terminal_title, latest_progress) = (
             &mut self.collector,
             &mut self.latest_title,
@@ -523,6 +594,7 @@ impl AgentOscStateTracker {
                     *latest_progress =
                         Some(sanitize_agent_osc_string(payload, AGENT_OSC_MAX_CHARS));
                 }
+                b"7577" => program_resume(payload),
                 _ => {}
             }
         });
@@ -898,6 +970,31 @@ mod tests {
 
     use super::*;
     use crate::layout::PaneId;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn program_resume_expires_a_handoff_owner_without_further_pty_output() {
+        let state: ProgramResume = serde_json::from_value(serde_json::json!({
+            "token": "example-for-handoff-test",
+            "last_time": {},
+            "active": {
+                "pid": u32::MAX, "shell_pid": u32::MAX, "start": 0,
+                "record": { "uid": 1000, "argv": ["editor"], "cwd": "/" }
+            }
+        }))
+        .unwrap();
+        let state = Arc::new(Mutex::new(state));
+        let (events, mut receiver) = mpsc::channel(1);
+        let pane_id = PaneId::from_raw(1);
+        let _reader = program_resume_report_handler(pane_id, Some(state.clone()), events);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(8), receiver.recv())
+            .await
+            .expect("owner should expire after the shutdown grace period");
+        assert!(
+            matches!(event, Some(AppEvent::ProgramResumeChanged { pane_id: id }) if id == pane_id)
+        );
+        assert!(state.lock().unwrap().record().is_none());
+    }
 
     fn pane_default_theme(
         pane: &super::super::GhosttyPaneTerminal,

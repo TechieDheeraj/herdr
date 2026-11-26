@@ -29,6 +29,11 @@ pub(crate) struct HandoffRuntimeState {
     pub initial_history_ansi: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state: Option<crate::terminal::state::HandoffAgentState>,
+    // The replacement server owns the same live PTY and must verify its original token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_resume: Option<crate::program_resume::ProgramResume>,
+    #[serde(default)]
+    pub respawn_shell_on_exit: bool,
 }
 
 #[cfg(unix)]
