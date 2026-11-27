@@ -911,7 +911,13 @@ impl Terminal {
             ffi::ghostty_terminal_set(
                 terminal.raw,
                 ffi::GhosttyTerminalOption_GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-                (&max_scrollback as *const usize).cast(),
+                // Ghostty distinguishes null (unlimited) from a pointer to zero
+                // (disabled). Keep existing numeric configuration semantics.
+                if max_scrollback == usize::MAX {
+                    ptr::null()
+                } else {
+                    (&max_scrollback as *const usize).cast()
+                },
             )
             .into_result()?;
             ffi::ghostty_terminal_set(
@@ -4518,6 +4524,23 @@ mod tests {
 
         let wide_only = terminal.read_text_viewport((3, 0), (3, 0), false).unwrap();
         assert_eq!(wide_only, "⚡");
+    }
+
+    #[test]
+    fn unlimited_scrollback_preserves_earliest_lines_and_alternate_screen_semantics() {
+        let mut terminal = Terminal::new(80, 3, usize::MAX).unwrap();
+        write_numbered_lines(&mut terminal, 10_000);
+        assert!(terminal.scrollback_rows().unwrap() >= 9997);
+        terminal.scroll_viewport_delta(-20_000);
+        assert!(terminal
+            .read_text_viewport((0, 0), (79, 2), false)
+            .unwrap()
+            .contains("000000"));
+        terminal.write(b"\x1b[?1049h");
+        write_numbered_lines(&mut terminal, 100);
+        assert_eq!(terminal.scrollback_rows().unwrap(), 0);
+        terminal.write(b"\x1b[?1049l");
+        assert!(terminal.scrollback_rows().unwrap() >= 9997);
     }
 
     #[test]

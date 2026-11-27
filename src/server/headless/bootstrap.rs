@@ -152,6 +152,7 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
             crate::handoff_runtime::ImportedHandoffRuntime {
                 master_fd: fd,
                 state: pane,
+                history_file: received.histories.remove(&pane_id),
             },
         );
     }

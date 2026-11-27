@@ -2277,3 +2277,267 @@ fn live_handoff_import_failure_rolls_back_old_server_at(failure_point: &str) {
 fn live_handoff_after_restored_failure_rolls_back_old_server() {
     live_handoff_import_failure_rolls_back_old_server_at("after_restored");
 }
+
+#[test]
+fn bash_history_survives_pane_move_handoff_and_cold_restore() {
+    let _lock = test_lock();
+    let base = Path::new("/var/tmp").join(unique_test_dir().file_name().unwrap());
+    let home = base.join("home");
+    let config = base.join("config");
+    let runtime = base.join("runtime");
+    let socket = runtime.join("api.sock");
+    let settings = base.join("config.toml");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(&settings, "onboarding = false\n[terminal]\ndefault_shell = '/bin/bash'\nshell_mode = 'non_login'\n[experimental]\nallow_nested = true\n").unwrap();
+    fs::write(
+        home.join("history.bash"),
+        include_str!("../src/integration/assets/bash/herdr-history.bash"),
+    )
+    .unwrap();
+    fs::write(
+        home.join(".bashrc"),
+        r#"
+PS1='HISTORY-READY> '
+HISTFILE=$HOME/.bash_history
+. "$HOME/history.bash"
+printf '%s' "$HERDR_SHELL_HISTORY_ID" > "$HOME/$HERDR_PANE_ID.key"
+"#,
+    )
+    .unwrap();
+    let launch = || {
+        spawn_server_with_env(
+            &config,
+            &runtime,
+            &socket,
+            &[
+                ("HOME", home.to_str().unwrap()),
+                ("HERDR_CONFIG_PATH", settings.to_str().unwrap()),
+                ("HERDR_SESSION", "bash-history-test"),
+                ("XDG_STATE_HOME", home.to_str().unwrap()),
+                ("ENV", ""),
+                ("BASH_ENV", ""),
+            ],
+        )
+    };
+    let api = |method: &str, params: serde_json::Value| {
+        request(
+            &socket,
+            serde_json::json!({"id":"history-test", "method":method, "params":params}),
+        )
+    };
+    let stop = || {
+        assert_ok(api("server.stop", serde_json::json!({})));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while socket.exists() {
+            assert!(Instant::now() < deadline, "test server did not stop");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let key = |pane: &str| {
+        wait_for_output(&socket, pane, "HISTORY-READY>");
+        fs::read_to_string(home.join(format!("{pane}.key"))).unwrap()
+    };
+    let history = |id: &str| home.join(format!("herdr/shell-history/bash/{id}.history"));
+    let send = |pane: &str, text: &str| {
+        assert_ok(api(
+            "pane.send_input",
+            serde_json::json!({"pane_id":pane,"text":text,"keys":["Enter"]}),
+        ))
+    };
+    let server = launch();
+    register_runtime_dir(&runtime);
+    wait_for_api(&socket, Duration::from_secs(10));
+    let mut panes = Vec::new();
+    let mut keys = Vec::new();
+    for command in ["echo history-first-pane", "echo history-second-pane"] {
+        let created = api(
+            "workspace.create",
+            serde_json::json!({"cwd":home,"focus":false}),
+        );
+        let pane = created["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let id = key(&pane);
+        send(&pane, command);
+        wait_for_file_contains(&history(&id), command, Duration::from_secs(5));
+        panes.push(pane);
+        keys.push(id);
+    }
+    assert_ne!(keys[0], keys[1]);
+    let moved = api(
+        "pane.move",
+        serde_json::json!({"pane_id":panes[0],
+        "destination":{"type":"new_workspace"}, "focus":false}),
+    );
+    let moved_pane = moved["result"]["move_result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(panes[0], moved_pane);
+    panes[0] = moved_pane;
+    assert_ok(api("server.live_handoff", serde_json::json!({})));
+    drop(server);
+    wait_for_api(&socket, Duration::from_secs(10));
+    stop();
+    let server = launch();
+    wait_for_api(&socket, Duration::from_secs(10));
+    for (index, pane) in panes.iter().enumerate() {
+        assert_eq!(key(pane), keys[index]);
+        // Readline Up-arrow must recall this terminal's last command.
+        send(pane, "\x1b[A");
+        wait_for_output(
+            &socket,
+            pane,
+            if index == 0 {
+                "history-first-pane"
+            } else {
+                "history-second-pane"
+            },
+        );
+    }
+    assert!(!fs::read_to_string(history(&keys[0]))
+        .unwrap()
+        .contains("history-second-pane"));
+    stop();
+    drop(server);
+
+    // Older snapshots have no key. Migration must save the generated keys even
+    // when a plain shell stays idle in its original cwd after restore.
+    let snapshot = config.join("herdr-dev/sessions/bash-history-test/session.json");
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    for ws in saved["workspaces"].as_array_mut().unwrap() {
+        for tab in ws["tabs"].as_array_mut().unwrap() {
+            for pane in tab["panes"].as_object_mut().unwrap().values_mut() {
+                pane.as_object_mut().unwrap().remove("shell_history_id");
+            }
+        }
+    }
+    fs::write(&snapshot, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let server = launch();
+    wait_for_api(&socket, Duration::from_secs(10));
+    for (index, pane) in panes.iter().enumerate() {
+        let migrated = key(pane);
+        assert_ne!(migrated, keys[index]);
+        wait_for_file_contains(&snapshot, &migrated, Duration::from_secs(15));
+    }
+    stop();
+    drop(server);
+    cleanup_test_base(&base);
+}
+
+#[test]
+fn full_scrollback_survives_handoff_rollback_and_cold_restore() {
+    let _lock = test_lock();
+    let base = Path::new("/var/tmp").join(unique_test_dir().file_name().unwrap());
+    let home = base.join("home");
+    let config = base.join("config");
+    let runtime = base.join("runtime");
+    let socket = runtime.join("api.sock");
+    let settings = base.join("config.toml");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(&settings, "onboarding = false\n[terminal]\ndefault_shell = '/bin/bash'\nshell_mode = 'non_login'\n[experimental]\nallow_nested = true\npane_history = true\n[advanced]\nscrollback_limit_bytes = 'unlimited'\n").unwrap();
+    fs::write(home.join("output.sh"), r#"
+printf 'scroll-start-%s\n' "$1"
+awk 'BEGIN { for (i=0;i<600;i++) print "history line " i " abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ" }'
+printf 'scroll-end-%s\n' "$1"
+"#).unwrap();
+    let launch = || {
+        spawn_server_with_env(
+            &config,
+            &runtime,
+            &socket,
+            &[
+                ("HOME", home.to_str().unwrap()),
+                ("HERDR_CONFIG_PATH", settings.to_str().unwrap()),
+                ("HERDR_SESSION", "full-history-test"),
+                ("ENV", ""),
+                ("BASH_ENV", ""),
+                ("PWD", "/unrelated-server-directory"),
+            ],
+        )
+    };
+    let api = |method: &str, params: serde_json::Value| {
+        request(
+            &socket,
+            serde_json::json!({"id":"full-history", "method":method, "params":params}),
+        )
+    };
+    let stop = || {
+        assert_ok(api("server.stop", serde_json::json!({})));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while socket.exists() {
+            assert!(Instant::now() < deadline, "test server did not stop");
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let server = launch();
+    register_runtime_dir(&runtime);
+    wait_for_api(&socket, Duration::from_secs(10));
+    let mut panes = Vec::new();
+    for index in 0..2 {
+        let created = api(
+            "workspace.create",
+            serde_json::json!({"cwd":home,"focus":false}),
+        );
+        let pane = created["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ok(api(
+            "pane.send_input",
+            serde_json::json!({"pane_id":pane,
+            "text":format!("/bin/sh \"$HOME/output.sh\" {index}"), "keys":["Enter"]}),
+        ));
+        wait_for_output(&socket, &pane, &format!("scroll-end-{index}"));
+        panes.push(pane);
+    }
+    let verify = || {
+        for (index, pane) in panes.iter().enumerate() {
+            let response = api(
+                "pane.read",
+                serde_json::json!({"pane_id":pane,"source":"recent","lines":1000,"format":"text"}),
+            );
+            let text = response["result"]["read"]["text"].as_str().unwrap();
+            assert!(
+                text.contains(&format!("scroll-start-{index}")),
+                "lost first line for {pane}"
+            );
+            assert!(
+                text.contains(&format!("scroll-end-{index}")),
+                "lost last line for {pane}"
+            );
+            assert!(
+                !text.contains(&format!("scroll-start-{}", 1 - index)),
+                "history mixed between panes"
+            );
+            assert!(text.len() > 8 * 1024);
+            assert!(!text.contains("shell-init: error retrieving current directory"));
+        }
+        let data = config.join("herdr-dev/sessions/full-history-test");
+        assert!(!fs::read_dir(data).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("herdr-handoff-history-")));
+    };
+    verify();
+    let rejected = api(
+        "server.live_handoff",
+        serde_json::json!({"expected_protocol":999999}),
+    );
+    assert!(rejected.get("error").is_some());
+    verify();
+    assert_ok(api("server.live_handoff", serde_json::json!({})));
+    drop(server);
+    wait_for_api(&socket, Duration::from_secs(10));
+    verify();
+    stop();
+    let server = launch();
+    wait_for_api(&socket, Duration::from_secs(10));
+    verify();
+    stop();
+    drop(server);
+    cleanup_test_base(&base);
+}

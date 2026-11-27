@@ -153,10 +153,11 @@ impl App {
         let rows = resolved_geometry.inner.height;
         let cols = resolved_geometry.inner.width;
         let (runtime, launch_argv) = spawn(pane_id, rows, cols, cwd.clone(), &launch_env, self)?;
-        let terminal = match launch_argv {
+        let mut terminal = match launch_argv {
             Some(argv) => TerminalState::new(terminal_id.clone(), cwd).with_launch_argv(argv),
             None => TerminalState::new(terminal_id.clone(), cwd),
         };
+        terminal.shell_history_id = runtime.shell_history_id();
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         self.state.terminals.insert(terminal_id.clone(), terminal);
         self.state.popup_pane = Some(crate::app::state::PopupPaneState {

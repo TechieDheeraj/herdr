@@ -11,6 +11,8 @@ pub(crate) mod clients;
 pub(crate) mod clipboard_image;
 #[cfg(unix)]
 pub(crate) mod handoff;
+#[cfg(unix)]
+mod handoff_history;
 pub mod headless;
 pub(crate) mod keybindings;
 pub(crate) mod notifications;

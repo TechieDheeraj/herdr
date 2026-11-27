@@ -1054,9 +1054,27 @@ pub struct ServerConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct AdvancedConfig {
-    /// Maximum scrollback buffer size in bytes retained per pane terminal. Default: 10000000.
-    #[serde(alias = "scrollback_lines")]
+    /// Per-pane byte limit, or "unlimited". Zero disables scrollback. Default: 10000000.
+    #[serde(alias = "scrollback_lines", deserialize_with = "read_scrollback_limit")]
     pub scrollback_limit_bytes: usize,
+}
+
+fn read_scrollback_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<usize, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Limit {
+        Bytes(usize),
+        Mode(String),
+    }
+    match Limit::deserialize(deserializer)? {
+        Limit::Bytes(bytes) => Ok(bytes),
+        Limit::Mode(mode) if mode == "unlimited" => Ok(usize::MAX),
+        Limit::Mode(_) => Err(serde::de::Error::custom(
+            "expected a nonnegative byte count or \"unlimited\"",
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2019,6 +2037,21 @@ headless_rows = 50
                 crate::config::DEFAULT_HEADLESS_ROWS
             )
         );
+    }
+
+    #[test]
+    fn scrollback_accepts_unlimited_without_changing_numeric_or_zero_limits() {
+        for (value, expected) in [("\"unlimited\"", usize::MAX), ("0", 0), ("12345", 12345)] {
+            let config: Config =
+                toml::from_str(&format!("[advanced]\nscrollback_limit_bytes = {value}\n")).unwrap();
+            assert_eq!(config.advanced.scrollback_limit_bytes, expected);
+        }
+        for value in ["-1", "true", "\"infinite\""] {
+            assert!(toml::from_str::<Config>(&format!(
+                "[advanced]\nscrollback_limit_bytes = {value}\n"
+            ))
+            .is_err());
+        }
     }
 
     #[test]

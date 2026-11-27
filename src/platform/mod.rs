@@ -224,7 +224,8 @@ impl ChildExitReason {
 
 #[cfg(unix)]
 pub(crate) use unix_common::{
-    classify_child_exit, poll_fd_readable, read_fd, shared_ssh_control_path,
+    classify_child_exit, descriptor_close_on_exec, open_state_file_no_follow, poll_fd_readable,
+    read_fd, same_anonymous_state_file, shared_ssh_control_path,
 };
 
 // Tests inject their own probe because the recorded hangup is process-global.
@@ -274,6 +275,14 @@ pub(crate) fn plugin_runtime_path(path: &std::path::Path) -> std::path::PathBuf 
 
 pub(crate) fn normalize_cwd_for_launch(path: &std::path::Path) -> std::path::PathBuf {
     normalize_cwd_for_launch_platform(path)
+}
+
+/// Keep the child shell's logical PWD aligned with the directory used for exec.
+pub(crate) fn apply_pane_cwd_env(command: &mut portable_pty::CommandBuilder) {
+    #[cfg(unix)]
+    unix_common::apply_pane_cwd_env(command);
+    #[cfg(not(unix))]
+    let _ = command;
 }
 
 #[cfg(not(windows))]

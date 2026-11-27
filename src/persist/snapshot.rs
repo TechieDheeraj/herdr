@@ -125,6 +125,12 @@ pub struct TabSnapshot {
 #[derive(Serialize, Deserialize)]
 pub struct PaneSnapshot {
     pub cwd: PathBuf,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::shell_history::read_optional"
+    )]
+    pub(crate) shell_history_id: Option<crate::shell_history::ShellHistoryId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +434,9 @@ fn capture_tab(
             id.raw(),
             PaneSnapshot {
                 cwd,
+                shell_history_id: runtime
+                    .and_then(|runtime| runtime.shell_history_id())
+                    .or_else(|| terminal.and_then(|terminal| terminal.shell_history_id.clone())),
                 label,
                 agent_name,
                 managed_agent_kind,
@@ -759,6 +768,31 @@ mod tests {
     }
 
     #[test]
+    fn shell_history_identity_is_optional_and_invalid_values_do_not_lose_panes() {
+        let id = crate::shell_history::ShellHistoryId::new().unwrap();
+        let mut json = serde_json::json!({"cwd": "/tmp"});
+        let old: PaneSnapshot = serde_json::from_value(json.clone()).unwrap();
+        assert!(old.shell_history_id.is_none());
+        json["shell_history_id"] = serde_json::json!(id);
+        let saved: PaneSnapshot = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(saved.shell_history_id, Some(id));
+        assert_eq!(
+            serde_json::to_value(saved).unwrap()["shell_history_id"],
+            json["shell_history_id"]
+        );
+        for invalid in [
+            serde_json::json!("../history"),
+            serde_json::json!(42),
+            serde_json::Value::Null,
+        ] {
+            json["shell_history_id"] = invalid;
+            let recovered: PaneSnapshot = serde_json::from_value(json.clone()).unwrap();
+            assert!(recovered.shell_history_id.is_none());
+            assert_eq!(recovered.cwd, PathBuf::from("/tmp"));
+        }
+    }
+
+    #[test]
     fn round_trip_layout_snapshot() {
         let layout = LayoutSnapshot::Split {
             direction: DirectionSnapshot::Horizontal,
@@ -786,6 +820,7 @@ mod tests {
         panes.insert(
             0,
             PaneSnapshot {
+                shell_history_id: None,
                 cwd: PathBuf::from("/home/can/Projects/herdr"),
                 label: None,
                 agent_name: None,
@@ -799,6 +834,7 @@ mod tests {
         panes.insert(
             1,
             PaneSnapshot {
+                shell_history_id: None,
                 cwd: PathBuf::from("/home/can/Projects/website"),
                 label: Some("website".into()),
                 agent_name: None,
@@ -1492,6 +1528,7 @@ mod tests {
         panes.insert(
             0,
             PaneSnapshot {
+                shell_history_id: None,
                 cwd: PathBuf::from("/tmp/this-directory-does-not-exist-for-herdr-test"),
                 label: None,
                 agent_name: None,
@@ -1505,6 +1542,7 @@ mod tests {
         panes.insert(
             1,
             PaneSnapshot {
+                shell_history_id: None,
                 cwd: std::env::var("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| PathBuf::from("/tmp")),

@@ -453,6 +453,17 @@ impl App {
         let session_writer = Arc::new(std::sync::Mutex::new(crate::persist::SessionWriter::new(
             policy.restore_session && snapshot.is_none(),
         )));
+        let needs_shell_history_migration = snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .workspaces
+                .iter()
+                .flat_map(|ws| &ws.tabs)
+                .any(|tab| {
+                    tab.panes
+                        .values()
+                        .any(|pane| pane.shell_history_id.is_none())
+                })
+        });
         let (workspaces, active, selected) = if let Some(snap) = snapshot {
             let history = config
                 .experimental
@@ -605,7 +616,12 @@ impl App {
             plugin_commands_in_flight: 0,
             host_terminal_theme: crate::terminal_theme::TerminalTheme::default(),
             host_cell_size: crate::kitty_graphics::HostCellSize::default(),
-            session_dirty: false,
+            // Save newly generated history identities even when a restored shell
+            // stays at its prompt without changing cwd or any other session fact.
+            session_dirty: needs_shell_history_migration
+                && restored_terminals
+                    .values()
+                    .any(|terminal| terminal.shell_history_id.is_some()),
             terminal_runtime_shutdowns: Vec::new(),
         };
 

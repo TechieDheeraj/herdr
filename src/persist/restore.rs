@@ -449,6 +449,7 @@ fn unavailable_restored_terminal(
     let mut terminal = TerminalState::new(TerminalId::alloc(), cwd);
     terminal.restore_error = Some(reason);
     if let Some(pane) = pane {
+        terminal.shell_history_id = pane.shell_history_id.clone();
         terminal.manual_label = pane.label.clone();
         terminal.launch_argv = pane.launch_argv.clone();
         if let Some(session) = restored_terminal_agent_session(pane.agent_session.as_ref(), false) {
@@ -545,6 +546,7 @@ fn restore_tab(
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
 
         let has_import = old_id.is_some_and(|old_id| imported_panes.contains_key(old_id));
+        let shell_history_id = saved_pane.and_then(|p| p.shell_history_id.clone());
         let saved_label = saved_pane.and_then(|p| p.label.clone());
         let saved_agent_name = saved_pane.and_then(|p| p.agent_name.clone());
         let saved_managed_agent = saved_pane
@@ -618,7 +620,8 @@ fn restore_tab(
                     pane_id.to_string(),
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .with_shell_history_id(shell_history_id.clone());
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
         #[cfg(unix)]
@@ -638,6 +641,7 @@ fn restore_tab(
             let terminal_id = TerminalId::alloc();
             let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone())
                 .with_pending_agent_resume_plan(plan);
+            terminal.shell_history_id = shell_history_id.clone();
             if let Some(label) = saved_label {
                 terminal.set_manual_label(label);
             }
@@ -727,6 +731,7 @@ fn restore_tab(
                 crate::handoff_runtime::ImportedHandoffRuntime {
                     master_fd: imported.master_fd,
                     state: imported.state.with_pane_id(*id),
+                    history_file: imported.history_file,
                 },
                 runtime_context.scrollback_limit_bytes,
                 crate::terminal_theme::TerminalTheme::default(),
@@ -746,6 +751,9 @@ fn restore_tab(
             Ok((runtime, respawn_shell)) => {
                 let terminal_id = TerminalId::alloc();
                 let mut terminal = TerminalState::new(terminal_id.clone(), cwd.clone());
+                terminal.shell_history_id = runtime
+                    .shell_history_id()
+                    .or_else(|| shell_history_id.clone());
                 if respawn_shell {
                     terminal = terminal.with_respawn_shell_on_exit();
                 }
@@ -1645,6 +1653,7 @@ mod tests {
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneSnapshot {
+                            shell_history_id: None,
                             cwd,
                             label: Some("reviewer".into()),
                             agent_name: Some("reviewer".into()),
@@ -1736,6 +1745,7 @@ mod tests {
                         (
                             10,
                             super::super::snapshot::PaneSnapshot {
+                                shell_history_id: None,
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
@@ -1749,6 +1759,7 @@ mod tests {
                         (
                             20,
                             super::super::snapshot::PaneSnapshot {
+                                shell_history_id: None,
                                 cwd: cwd.clone(),
                                 label: None,
                                 agent_name: None,
@@ -1830,6 +1841,7 @@ mod tests {
             (
                 id.parse::<u32>().unwrap(),
                 super::super::snapshot::PaneSnapshot {
+                    shell_history_id: None,
                     cwd: cwd.clone(),
                     label: None,
                     agent_name: None,
@@ -1842,6 +1854,7 @@ mod tests {
             )
         };
         let final_pane = super::super::snapshot::PaneSnapshot {
+            shell_history_id: None,
             cwd: cwd.clone(),
             label: Some("planner".into()),
             agent_name: Some("planner".into()),
@@ -2008,6 +2021,7 @@ mod tests {
                     panes: HashMap::from([(
                         0,
                         super::super::snapshot::PaneSnapshot {
+                            shell_history_id: None,
                             cwd,
                             label: None,
                             agent_name: None,
@@ -2151,6 +2165,7 @@ mod tests {
                 crate::handoff_runtime::ImportedHandoffRuntime {
                     master_fd: runtime.duplicate_handoff_fd().unwrap(),
                     state,
+                    history_file: None,
                 },
             )]);
             let (_, mut restored_terminals, restored_runtimes) = restore_handoff(
@@ -2395,6 +2410,7 @@ mod tests {
         panes.insert(
             0,
             super::super::snapshot::PaneSnapshot {
+                shell_history_id: None,
                 cwd: cwd.clone(),
                 label: None,
                 agent_name: None,

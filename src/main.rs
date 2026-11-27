@@ -24,6 +24,7 @@ mod copy_mode;
 mod detect;
 mod events;
 mod program_resume;
+mod shell_history;
 use ghostty_vt as ghostty;
 mod handoff_runtime;
 mod health;
@@ -447,7 +448,7 @@ pane_history = false
 
 [advanced]
 # Maximum scrollback buffer size in bytes retained per pane terminal.
-# Matches Ghostty's default scrollback-limit behavior.
+# Use "unlimited" for no byte cap (memory grows with output); 0 disables it.
 # scrollback_limit_bytes = 10000000
 "##;
 

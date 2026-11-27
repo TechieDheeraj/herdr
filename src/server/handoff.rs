@@ -42,6 +42,11 @@ pub(crate) struct HandoffManifest {
     pub expected_protocol: Option<u32>,
     pub snapshot: crate::persist::SessionSnapshot,
     pub panes: Vec<crate::handoff_runtime::HandoffRuntimeState>,
+    /// Pane order for optional anonymous history descriptors. Extra descriptors
+    /// are sent only after the importer explicitly negotiates history-fds-v1.
+    /// Older importers keep using the bounded inline replay.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_panes: Vec<u32>,
     /// An outer window title set over the API outlives the server that took the
     /// call, so a handoff carries it rather than falling back to the config.
     /// Absent from manifests written before this field existed.
@@ -57,6 +62,7 @@ pub(crate) struct HandoffManifest {
 pub(crate) struct ReceivedHandoff {
     pub manifest: HandoffManifest,
     pub fds: Vec<RawFd>,
+    pub histories: std::collections::HashMap<u32, std::fs::File>,
     pub stream: UnixStream,
 }
 
@@ -153,7 +159,7 @@ pub(crate) fn accept_and_validate_on(
     socket_path: &Path,
     token: &str,
     manifest: &HandoffManifest,
-) -> io::Result<UnixStream> {
+) -> io::Result<(UnixStream, bool)> {
     let (mut stream, _) = accept_with_timeout(&listener, READY_TIMEOUT)?;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
@@ -172,16 +178,23 @@ pub(crate) fn accept_and_validate_on(
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let validated = read_line_unbuffered(&mut stream)?;
-    if validated.trim_end() != "validated" {
-        return Err(io::Error::other("handoff import did not validate manifest"));
-    }
+    let full_history = match validated.trim_end() {
+        "validated" => false,
+        "validated history-fds-v1" if !manifest.history_panes.is_empty() => true,
+        _ => return Err(io::Error::other("handoff import did not validate manifest")),
+    };
     let _ = std::fs::remove_file(socket_path);
-    Ok(stream)
+    Ok((stream, full_history))
 }
 
 #[cfg(unix)]
-pub(crate) fn send_fds_and_wait_restored(stream: &mut UnixStream, fds: &[RawFd]) -> io::Result<()> {
+pub(crate) fn send_fds_and_wait_restored(
+    stream: &mut UnixStream,
+    fds: &[RawFd],
+    history_fds: &[RawFd],
+) -> io::Result<()> {
     send_fds(stream, fds)?;
+    send_fds(stream, history_fds)?;
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let restored = read_line_unbuffered(&mut *stream)?;
@@ -266,12 +279,53 @@ pub(crate) fn receive(socket_path: &Path, token: &str) -> io::Result<ReceivedHan
             crate::build_info::version()
         )));
     }
-    stream.write_all(b"validated\n")?;
+    let panes: std::collections::HashSet<_> =
+        manifest.panes.iter().map(|pane| pane.pane_id).collect();
+    let mut seen = std::collections::HashSet::new();
+    if manifest
+        .history_panes
+        .iter()
+        .any(|pane| !panes.contains(pane) || !seen.insert(*pane))
+    {
+        return Err(io::Error::other("invalid handoff history pane list"));
+    }
+    stream.write_all(if manifest.history_panes.is_empty() {
+        b"validated\n"
+    } else {
+        b"validated history-fds-v1\n"
+    })?;
     stream.flush()?;
     let fds = recv_fds(&stream, manifest.panes.len())?;
+    let history_fds = match recv_fds(&stream, manifest.history_panes.len()) {
+        Ok(fds) => fds,
+        Err(error) => {
+            close_raw_fds(&fds);
+            return Err(error);
+        }
+    };
+    use std::os::fd::FromRawFd;
+    let histories: std::collections::HashMap<_, _> = manifest
+        .history_panes
+        .iter()
+        .copied()
+        .zip(history_fds.into_iter().map(|fd| {
+            // SAFETY: recv_fds returned a new descriptor owned by this receiver.
+            unsafe { std::fs::File::from_raw_fd(fd) }
+        }))
+        .collect();
+    if histories
+        .values()
+        .any(|file| !crate::platform::program_resume::private_snapshot(file))
+    {
+        close_raw_fds(&fds);
+        return Err(io::Error::other(
+            "handoff history descriptor is not a private regular file",
+        ));
+    }
     Ok(ReceivedHandoff {
         manifest,
         fds,
+        histories,
         stream,
     })
 }
@@ -321,6 +375,7 @@ pub(crate) fn manifest_for(
         expected_protocol,
         snapshot,
         panes,
+        history_panes: Vec::new(),
         api_window_title,
         host_shutdown_intent,
     }
@@ -534,6 +589,12 @@ fn recv_fd_batch(stream: &UnixStream, wanted: usize) -> io::Result<Vec<RawFd>> {
     if out.is_empty() {
         return Err(io::Error::other("handoff fd message missing SCM_RIGHTS"));
     }
+    for fd in &out {
+        if let Err(error) = crate::platform::descriptor_close_on_exec(*fd) {
+            close_raw_fds(&out);
+            return Err(error);
+        }
+    }
     Ok(out)
 }
 
@@ -545,6 +606,100 @@ pub(crate) fn log_import_result(panes: usize) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_fd_negotiation_preserves_both_legacy_directions() {
+        use std::io::Read;
+        for (full_export, full_import) in [(true, true), (true, false), (false, true)] {
+            let socket = PathBuf::from(format!(
+                "/tmp/herdr-history-{}-{full_export}-{full_import}.sock",
+                std::process::id()
+            ));
+            let listener = bind_listener(&socket).unwrap();
+            let history = "oldest\n".to_owned() + &"history line\n".repeat(3000) + "newest\n";
+            let pane: crate::handoff_runtime::HandoffRuntimeState =
+                serde_json::from_value(serde_json::json!({
+                    "pane_id": 1, "child_pid": 0, "rows": 3, "cols": 10,
+                    "cell_width_px": 0, "cell_height_px": 0,
+                    "initial_history_ansi": "recent-only\r\n"
+                }))
+                .unwrap();
+            let mut manifest = manifest_for(empty_snapshot(), vec![pane], None, None, None, None);
+            let mut histories = super::super::handoff_history::HistoryFiles::new(
+                &socket,
+                format!("test-{}", std::process::id()),
+            )
+            .unwrap();
+            if full_export {
+                histories.store(1, &history).unwrap();
+                manifest.history_panes = histories.panes();
+            }
+            let export_socket = socket.clone();
+            let exporter = std::thread::spawn(move || {
+                let (mut stream, negotiated) = if full_export {
+                    accept_and_validate_on(listener, &export_socket, "test-token", &manifest)
+                        .unwrap()
+                } else {
+                    // Freeze the old exporter's exact acknowledgment behavior:
+                    // unknown suffixes fail rather than silently opt into FDs.
+                    let (mut stream, _) = accept_with_timeout(&listener, READY_TIMEOUT).unwrap();
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(READY_TIMEOUT)).unwrap();
+                    assert_eq!(read_line_unbuffered(&mut stream).unwrap(), "test-token\n");
+                    serde_json::to_writer(&mut stream, &manifest).unwrap();
+                    stream.write_all(b"\n").unwrap();
+                    assert_eq!(read_line_unbuffered(&mut stream).unwrap(), "validated\n");
+                    (stream, false)
+                };
+                let placeholder_pty = std::fs::File::open("/dev/null").unwrap();
+                let extra = if negotiated {
+                    histories.fds()
+                } else {
+                    Vec::new()
+                };
+                send_fds_and_wait_restored(&mut stream, &[placeholder_pty.as_raw_fd()], &extra)
+                    .unwrap();
+                negotiated
+            });
+            if full_import {
+                let mut received = receive(&socket, "test-token").unwrap();
+                assert_eq!(
+                    received.manifest.panes[0].initial_history_ansi.as_deref(),
+                    Some("recent-only\r\n")
+                );
+                if full_export {
+                    let mut actual = String::new();
+                    received
+                        .histories
+                        .remove(&1)
+                        .unwrap()
+                        .read_to_string(&mut actual)
+                        .unwrap();
+                    assert_eq!(actual, history);
+                } else {
+                    assert!(received.histories.is_empty());
+                }
+                close_raw_fds(&received.fds);
+                report_restored(&mut received.stream).unwrap();
+            } else {
+                let mut stream = UnixStream::connect(&socket).unwrap();
+                stream.set_read_timeout(Some(READY_TIMEOUT)).unwrap();
+                stream.write_all(b"test-token\n").unwrap();
+                let manifest: serde_json::Value =
+                    serde_json::from_str(&read_line_unbuffered(&mut stream).unwrap()).unwrap();
+                assert_eq!(
+                    manifest["panes"][0]["initial_history_ansi"],
+                    "recent-only\r\n"
+                );
+                stream.write_all(b"validated\n").unwrap();
+                let fds = recv_fds(&stream, 1).unwrap();
+                close_raw_fds(&fds);
+                report_restored(&mut stream).unwrap();
+            }
+            assert_eq!(exporter.join().unwrap(), full_export && full_import);
+            let _ = std::fs::remove_file(socket);
+        }
+    }
 
     fn empty_snapshot() -> crate::persist::SessionSnapshot {
         crate::persist::SessionSnapshot {

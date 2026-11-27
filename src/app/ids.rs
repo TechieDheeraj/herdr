@@ -47,13 +47,16 @@ impl App {
         let ws = self.state.workspaces.get(ws_idx)?;
         let tab_idx = ws.find_tab_index_for_pane(pane_id)?;
         let tab_id = self.public_tab_id(ws_idx, tab_idx)?;
+        let shell_history_id = ws.tabs[tab_idx]
+            .panes
+            .get(&pane_id)
+            .and_then(|pane| self.state.terminals.get(&pane.attached_terminal_id))
+            .and_then(|terminal| terminal.shell_history_id.clone());
         let pane_id = self.public_pane_id(ws_idx, pane_id)?;
         Some(
-            crate::pane::PaneLaunchEnv::from_extra(extra_env).with_identity(
-                workspace_id,
-                tab_id,
-                pane_id,
-            ),
+            crate::pane::PaneLaunchEnv::from_extra(extra_env)
+                .with_identity(workspace_id, tab_id, pane_id)
+                .with_shell_history_id(shell_history_id),
         )
     }
 

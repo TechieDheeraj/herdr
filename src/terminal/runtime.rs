@@ -58,8 +58,12 @@ impl TerminalRuntime {
         self.0.handoff_runtime_state(pane_id)
     }
 
+    pub(crate) fn shell_history_id(&self) -> Option<crate::shell_history::ShellHistoryId> {
+        self.0.shell_history_id.clone()
+    }
+
     #[cfg(unix)]
-    pub fn handoff_history_ansi(&self) -> Option<String> {
+    pub fn handoff_history_ansi(&self) -> std::io::Result<Option<String>> {
         self.0.handoff_history_ansi()
     }
 

@@ -77,30 +77,48 @@ impl HeadlessServer {
             self.app.state.selected,
         );
 
-        let mut handoff_entries = Vec::new();
-        for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
-            let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
-                continue;
+        let mut history_files =
+            match crate::server::handoff_history::HistoryFiles::new(&socket_path, token.clone()) {
+                Ok(files) => files,
+                Err(error) => {
+                    self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+                    return Err(error);
+                }
             };
-            let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
-            let terminal = self.app.state.terminals.get(terminal_id);
-            handoff_runtime.agent_state =
-                terminal.and_then(|terminal| terminal.handoff_agent_state());
-            handoff_runtime.respawn_shell_on_exit =
-                terminal.is_some_and(|terminal| terminal.respawn_shell_on_exit);
-            let has_agent_session =
-                terminal.is_some_and(|terminal| terminal.persisted_agent_session.is_some());
-            if !has_agent_session {
-                handoff_runtime.initial_history_ansi = runtime.handoff_history_ansi();
+        let mut handoff_entries = Vec::new();
+        let histories_result = (|| {
+            for (terminal_id, runtime) in self.app.terminal_runtimes.iter() {
+                let Some(pane_id) = pane_by_terminal.get(terminal_id).copied() else {
+                    continue;
+                };
+                let mut handoff_runtime = runtime.handoff_runtime_state(pane_id);
+                let terminal = self.app.state.terminals.get(terminal_id);
+                handoff_runtime.agent_state =
+                    terminal.and_then(|terminal| terminal.handoff_agent_state());
+                handoff_runtime.respawn_shell_on_exit =
+                    terminal.is_some_and(|terminal| terminal.respawn_shell_on_exit);
+                if let Some(history) = runtime.handoff_history_ansi()? {
+                    history_files.store(pane_id, &history)?;
+                    handoff_runtime.initial_history_ansi =
+                        Some(crate::pane::truncate_handoff_history(
+                            history,
+                            crate::server::handoff::MAX_REPLAY_BYTES_PER_PANE,
+                        ));
+                }
+                handoff_entries.push((terminal_id.clone(), handoff_runtime));
             }
-            handoff_entries.push((terminal_id.clone(), handoff_runtime));
+            Ok::<(), io::Error>(())
+        })();
+        if let Err(error) = histories_result {
+            self.rollback_handoff_before_commit(&socket_path, &paused_terminal_ids);
+            return Err(error);
         }
 
         let panes = handoff_entries
             .iter()
             .map(|(_, runtime)| runtime.clone())
             .collect();
-        let manifest = crate::server::handoff::manifest_for(
+        let mut manifest = crate::server::handoff::manifest_for(
             snapshot,
             panes,
             params.expected_protocol,
@@ -108,6 +126,7 @@ impl HeadlessServer {
             self.api_window_title.clone(),
             self.host_shutdown_intent.get(),
         );
+        manifest.history_panes = history_files.panes();
         let mut import_child = match crate::server::handoff::spawn_handoff_import(
             import_exe.as_deref(),
             &socket_path,
@@ -141,7 +160,7 @@ impl HeadlessServer {
             return Err(err);
         }
 
-        let mut stream = match crate::server::handoff::accept_and_validate_on(
+        let (mut stream, full_history) = match crate::server::handoff::accept_and_validate_on(
             listener,
             &socket_path,
             &token,
@@ -158,7 +177,13 @@ impl HeadlessServer {
             }
         };
 
-        let send_result = crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds);
+        let history_fds = if full_history {
+            history_files.fds()
+        } else {
+            Vec::new()
+        };
+        let send_result =
+            crate::server::handoff::send_fds_and_wait_restored(&mut stream, &fds, &history_fds);
         for fd in fds {
             let _ = unsafe { libc::close(fd) };
         }

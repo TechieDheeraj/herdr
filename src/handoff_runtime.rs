@@ -50,4 +50,7 @@ pub(crate) struct ImportedHandoffRuntime {
     pub master_fd: std::os::fd::RawFd,
     #[cfg(unix)]
     pub state: HandoffRuntimeState,
+    /// Local import resource, never part of the serialized runtime protocol.
+    #[cfg(unix)]
+    pub history_file: Option<std::fs::File>,
 }

@@ -70,6 +70,40 @@ When enabled, Herdr stores saved pane history in `session-history.json` next to 
 
 History is replayed only when it matches the exact saved layout. History from a different layout, including after manual snapshot recovery, is ignored. Older history files without layout verification are also ignored; newly saved history can be replayed on the next restart.
 
+### Scrollback retention and navigation
+
+The live terminal limit and persistence are separate. To retain all primary-screen scrollback and save it across full server restarts:
+
+```toml
+[advanced]
+scrollback_limit_bytes = "unlimited"
+
+[experimental]
+pane_history = true
+```
+
+The default limit is 10,000,000 bytes per pane; a numeric `0` still disables scrollback. `"unlimited"` removes Herdr's byte cap, so memory and saved-history storage grow with output. This setting applies when a terminal is created or recreated, including handoff; a config reload alone does not expand an existing terminal. Already discarded output cannot be recovered.
+
+Enter copy mode with `prefix+[` and press `g` to reach the beginning, `G` to reach the end, or PageUp/PageDown to browse. `prefix+e` opens retained scrollback in your editor.
+
+Full-screen applications using the alternate screen own their conversation or document history. Increasing Herdr's primary-screen scrollback does not capture content that an application has not rendered. Handoff still relies on these applications to repaint their alternate screen and does not transfer the hidden primary screen underneath it. For Codex, `codex --no-alt-screen` retains inline terminal scrollback; resume the same conversation and press Ctrl+T to open its transcript for older prompts. See the [Codex keymap documentation](https://learn.chatgpt.com/docs/config-file/config-basic#tui-keymap) and [Copilot CLI controls](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference). Copilot's conversation timeline can be browsed with PageUp/PageDown and searched with Ctrl+F; Ctrl+E with an empty prompt expands all items after the first message. Agent-native resume restores conversation data; it does not reconstruct every historical terminal frame.
+
+## Bash command history
+
+Bash's Up-arrow history is separate from pane screen history and agent resume. The optional Bash hook saves completed commands at each prompt to a private history file for that terminal. Herdr preserves its identity across pane moves, live handoff, and cold restore, so Up-arrow traverses only that pane’s commands.
+
+From this source checkout, install the hook on each machine that runs Bash panes:
+
+```sh
+python3 scripts/install-bash-history.py
+```
+
+The installer backs up changed startup files and adds a loader to `.bashrc` and the active Bash login file without replacing your settings. No Herdr configuration change or `program_resume_allowlist` entry is needed. It applies to new and restored interactive Bash shells; handoff cannot inject the hook into a Bash process that is already running. Existing shells retain their current in-memory history until they exit. Commands from before this integration cannot be assigned to individual restored panes automatically; global Bash history is not imported. Commands already lost before installation cannot be recovered.
+
+Files live under `${XDG_STATE_HOME:-$HOME/.local/state}/herdr/shell-history/bash/`, outside the Herdr config directory. A new terminal starts with an empty history file. A restored terminal loads only its own saved commands, even if your startup files explicitly read global history. The hook respects disabled history, `HISTCONTROL`, `HISTIGNORE`, `HISTSIZE`, and `HISTFILESIZE`; it does not save a currently running command until the prompt returns. Keep this state directory and the session snapshot together when migrating machines. To disable the hook, remove its managed loader from your Bash startup files.
+
+On macOS Bash 3.2, an append bug requires saving the current shell's full history list at each prompt and at exit. After leaving a nested Bash, the parent shell's own history becomes the saved history again. A fresh Bash 3.2 shell may duplicate its own saved entries on normal exit. Newer Bash uses incremental appends.
+
 ## Native agent session restore
 
 Some agents can resume their own conversation sessions. Herdr can use official integration-reported session references to restart supported agent panes after a Herdr server restart.
@@ -148,7 +182,7 @@ python3 scripts/codex-session-handoff.py --herdr "$(command -v herdr)" --session
 The helper also installs the Codex integration for future clients. Run it on the host that owns the panes. It requires no conversation IDs as input. Your fork installer can invoke it before `server live-handoff`; rerunning it is safe.
 
 
-Unlike snapshot restore, pane history replay, and native agent session restore, handoff tries to keep the current processes alive rather than reconstructing state after the old server stops.
+Unlike snapshot restore, pane history replay, and native agent session restore, handoff tries to keep the current processes alive rather than reconstructing state after the old server stops. When both binaries support full-history transfer, handoff carries all retained primary-screen history through private anonymous files, outside the bounded manifest. It falls back to the older bounded replay when either binary lacks this support; upgrading cannot recover history already discarded by the old exporter.
 
 A successful handoff preserves long-lived server-owned session state: pane PTYs and processes, agent identity and durable metadata, and plugin/session state needed by the replacement server. It does not preserve transient coordination across the replacement boundary. In-flight CLI or API requests, waits, subscription streams, client sockets, and pane-to-pane messages may be interrupted; clients should reconnect and retry them.
 

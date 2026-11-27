@@ -542,6 +542,25 @@ impl PaneTerminal {
         self.ghostty.recent_unwrapped_ansi_snapshot(lines)
     }
 
+    #[cfg(unix)]
+    pub(crate) fn handoff_history_ansi(&self) -> std::io::Result<Option<String>> {
+        let mut core =
+            self.ghostty.core.lock().map_err(|_| {
+                std::io::Error::other("terminal lock poisoned during history capture")
+            })?;
+        if core
+            .terminal
+            .active_screen()
+            .map_err(std::io::Error::other)?
+            == crate::ghostty::ActiveScreen::Alternate
+        {
+            return Ok(None);
+        }
+        let snapshot = ghostty_recent_ansi_snapshot(&mut core, usize::MAX, true)
+            .map_err(std::io::Error::other)?;
+        Ok((!snapshot.text.trim().is_empty()).then_some(snapshot.text))
+    }
+
     pub fn extract_selection(&self, selection: &crate::selection::Selection) -> Option<String> {
         self.ghostty.extract_selection(selection)
     }

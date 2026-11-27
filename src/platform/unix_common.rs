@@ -641,9 +641,69 @@ pub(crate) fn set_default_plugin_pane_pwd(env: &mut Vec<(String, String)>, cwd: 
     }
 }
 
+/// Bash checks inherited PWD before falling back to getcwd during shell-init.
+/// A server's PWD belongs to the server, not to a new/restored pane.
+pub(crate) fn apply_pane_cwd_env(command: &mut portable_pty::CommandBuilder) {
+    let cwd = command.get_cwd().map(std::path::PathBuf::from);
+    command.env_remove("PWD");
+    if let Some(cwd) = cwd.filter(|cwd| cwd.is_absolute() && cwd.is_dir()) {
+        command.env("PWD", cwd);
+    }
+}
+
+/// Open an untrusted state-file name without following links or waiting on a
+/// FIFO. Callers validate the returned descriptor's type, owner and permissions.
+pub(crate) fn open_state_file_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+pub(crate) fn same_anonymous_state_file(
+    writer: &std::fs::File,
+    reader: &std::fs::File,
+) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let a = writer.metadata()?;
+    let b = reader.metadata()?;
+    Ok(a.is_file()
+        && b.is_file()
+        && a.dev() == b.dev()
+        && a.ino() == b.ino()
+        && a.nlink() == 0
+        && b.nlink() == 0)
+}
+
+pub(crate) fn descriptor_close_on_exec(fd: std::os::fd::RawFd) -> std::io::Result<()> {
+    // SAFETY: fcntl validates the descriptor; these operations take integer flags.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_pwd_matches_launch_directory_and_preserves_logical_symlink() {
+        let root = std::env::temp_dir().join(format!("herdr-pwd-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("actual")).unwrap();
+        std::os::unix::fs::symlink(root.join("actual"), root.join("logical")).unwrap();
+        let mut cmd = portable_pty::CommandBuilder::new("/bin/bash");
+        cmd.env("PWD", "/unrelated-server-directory");
+        cmd.cwd(root.join("logical"));
+        apply_pane_cwd_env(&mut cmd);
+        assert_eq!(cmd.get_env("PWD"), Some(root.join("logical").as_os_str()));
+        cmd.cwd(root.join("missing"));
+        apply_pane_cwd_env(&mut cmd);
+        assert!(cmd.get_env("PWD").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn server_hangup_evidence_expires() {

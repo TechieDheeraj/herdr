@@ -309,6 +309,11 @@ impl App {
             return false;
         }
 
+        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+            terminal.shell_history_id = runtime
+                .shell_history_id()
+                .or_else(|| terminal.shell_history_id.clone());
+        }
         self.terminal_runtimes.insert(terminal_id.clone(), runtime);
         if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
             terminal.pending_agent_resume_plan = None;

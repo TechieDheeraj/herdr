@@ -140,6 +140,7 @@ fn apply_pane_terminal_env(cmd: &mut CommandBuilder) {
 pub(crate) struct PaneLaunchEnv {
     extra: Vec<(String, String)>,
     identity: PaneLaunchIdentity,
+    shell_history_id: Option<crate::shell_history::ShellHistoryId>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -159,6 +160,7 @@ impl PaneLaunchEnv {
         Self {
             extra,
             identity: PaneLaunchIdentity::Inherit,
+            shell_history_id: None,
         }
     }
 
@@ -176,6 +178,14 @@ impl PaneLaunchEnv {
         self
     }
 
+    pub(crate) fn with_shell_history_id(
+        mut self,
+        id: Option<crate::shell_history::ShellHistoryId>,
+    ) -> Self {
+        self.shell_history_id = id;
+        self
+    }
+
     pub(crate) fn without_pane_identity(mut self) -> Self {
         self.identity = PaneLaunchIdentity::OmitPane;
         self
@@ -183,6 +193,8 @@ impl PaneLaunchEnv {
 }
 
 fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
+    // Replace the server's inherited PWD before explicit launch overrides.
+    crate::platform::apply_pane_cwd_env(cmd);
     #[cfg(unix)]
     crate::platform::ssh_agent::apply_pane_env(cmd);
     // A new pane is not a child agent of the process that started the server.
@@ -199,6 +211,11 @@ fn apply_pane_launch_env(cmd: &mut CommandBuilder, launch_env: &PaneLaunchEnv) {
     }
     for (key, value) in &launch_env.extra {
         cmd.env(key, value);
+    }
+    // New panes must not inherit the launching terminal's history identity.
+    cmd.env_remove(crate::shell_history::ENV_VAR);
+    if let Some(id) = &launch_env.shell_history_id {
+        cmd.env(crate::shell_history::ENV_VAR, id.as_str());
     }
     cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
     crate::integration::apply_pane_base_env(cmd);
@@ -1510,6 +1527,7 @@ async fn run_terminal_compression_task(
 /// compression step may finish before releasing its terminal reference.
 pub struct PaneRuntime {
     pane_id: PaneId,
+    pub(crate) shell_history_id: Option<crate::shell_history::ShellHistoryId>,
     terminal: Arc<PaneTerminal>,
     io: PaneRuntimeIo,
     current_size: Cell<(u16, u16, u32, u32)>,
@@ -1819,7 +1837,7 @@ fn shutdown_pane_processes(
 }
 
 #[cfg(unix)]
-fn truncate_handoff_history(history: String, max_bytes: usize) -> String {
+pub(crate) fn truncate_handoff_history(history: String, max_bytes: usize) -> String {
     if history.len() <= max_bytes {
         return history;
     }
@@ -2343,13 +2361,10 @@ impl PaneRuntime {
     }
 
     #[cfg(unix)]
-    pub fn handoff_history_ansi(&self) -> Option<String> {
-        if self.terminal.alternate_screen_active() {
-            return None;
-        }
-        self.snapshot_history().map(|history| {
-            truncate_handoff_history(history, crate::server::handoff::MAX_REPLAY_BYTES_PER_PANE)
-        })
+    pub fn handoff_history_ansi(&self) -> std::io::Result<Option<String>> {
+        let result = self.terminal.handoff_history_ansi();
+        self.compression.wake();
+        result
     }
 
     pub fn apply_host_terminal_theme(&self, theme: crate::terminal_theme::TerminalTheme) {
@@ -2536,7 +2551,11 @@ impl PaneRuntime {
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<Self> {
-        let crate::handoff_runtime::ImportedHandoffRuntime { master_fd, state } = import;
+        let crate::handoff_runtime::ImportedHandoffRuntime {
+            master_fd,
+            state,
+            history_file,
+        } = import;
         let crate::handoff_runtime::HandoffRuntimeState {
             pane_id,
             child_pid,
@@ -2548,7 +2567,7 @@ impl PaneRuntime {
             keyboard_protocol_ansi,
             input_state,
             terminal_title,
-            initial_history_ansi,
+            mut initial_history_ansi,
             agent_state: _,
             program_resume,
             respawn_shell_on_exit: _,
@@ -2557,6 +2576,13 @@ impl PaneRuntime {
         use std::os::fd::FromRawFd;
 
         let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_fd) };
+        if let Some(mut history_file) = history_file {
+            // Seed one pane at a time, rather than staging all panes' complete
+            // histories in memory along with both servers' terminal state.
+            let mut history = String::new();
+            std::io::Read::read_to_string(&mut history_file, &mut history)?;
+            initial_history_ansi = Some(history);
+        }
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
         let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
@@ -2697,6 +2723,7 @@ impl PaneRuntime {
 
         Ok(Self {
             pane_id,
+            shell_history_id: None,
             terminal,
             io,
             current_size: Cell::new((rows, cols, cell_width_px, cell_height_px)),
@@ -2736,6 +2763,15 @@ impl PaneRuntime {
         initial_state: SpawnInitialState<'_>,
         agent_detection: AgentDetection,
     ) -> std::io::Result<Self> {
+        let shell_history_id = match cmd
+            .get_env(crate::shell_history::ENV_VAR)
+            .and_then(|id| id.to_str())
+        {
+            Some(id) => crate::shell_history::ShellHistoryId::try_from(id.to_owned())
+                .map_err(std::io::Error::other)?,
+            None => crate::shell_history::ShellHistoryId::new()?,
+        };
+        cmd.env(crate::shell_history::ENV_VAR, shell_history_id.as_str());
         crate::logging::pane_spawn_started(pane_id.raw(), rows, cols, scrollback_limit_bytes);
 
         let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
@@ -3329,6 +3365,7 @@ impl PaneRuntime {
 
         Ok(Self {
             pane_id,
+            shell_history_id: Some(shell_history_id),
             terminal,
             io,
             current_size: Cell::new((rows, cols, 0, 0)),
@@ -4120,6 +4157,7 @@ impl PaneRuntime {
         (
             Self {
                 pane_id,
+                shell_history_id: None,
                 terminal,
                 io: PaneRuntimeIo::TestChannel {
                     sender: tx,
@@ -4395,6 +4433,25 @@ mod tests {
     }
 
     #[test]
+    fn pane_launch_env_only_reuses_explicit_saved_history_identity() {
+        let inherited = crate::shell_history::ShellHistoryId::new().unwrap();
+        let restored = crate::shell_history::ShellHistoryId::new().unwrap();
+        let mut cmd = CommandBuilder::new("shell");
+        cmd.env(crate::shell_history::ENV_VAR, inherited.as_str());
+        let env = PaneLaunchEnv::from_extra(vec![(
+            crate::shell_history::ENV_VAR.into(),
+            inherited.as_str().into(),
+        )]);
+        apply_pane_launch_env(&mut cmd, &env);
+        assert!(cmd.get_env(crate::shell_history::ENV_VAR).is_none());
+        apply_pane_launch_env(&mut cmd, &env.with_shell_history_id(Some(restored.clone())));
+        assert_eq!(
+            cmd.get_env(crate::shell_history::ENV_VAR),
+            Some(OsStr::new(restored.as_str()))
+        );
+    }
+
+    #[test]
     fn pane_launch_env_removes_outer_agent_identity() {
         let keys = [
             "CODEX_THREAD_ID",
@@ -4514,6 +4571,7 @@ mod tests {
             ("CLAUDE_CODE_SESSION_ID".into(), "intentional-child".into()),
             ("CLAUDE_CODE_MESSAGING_TOKEN".into(), "fake-token".into()),
             ("ITERM_SESSION_ID".into(), "intentional-host".into()),
+            ("PWD".into(), "/explicit-launch-directory".into()),
         ];
         let mut cmd = CommandBuilder::new("shell");
         apply_pane_terminal_env(&mut cmd);
@@ -5279,7 +5337,7 @@ mod tests {
         let runtime =
             PaneRuntime::test_with_scrollback_bytes(40, 5, 4096, b"handoff-primary-history\r\n");
 
-        let history = runtime.handoff_history_ansi().unwrap();
+        let history = runtime.handoff_history_ansi().unwrap().unwrap();
 
         assert!(history.contains("handoff-primary-history"));
     }
@@ -5294,7 +5352,7 @@ mod tests {
             b"primary\r\n\x1b[?1049halt-screen",
         );
 
-        assert!(runtime.handoff_history_ansi().is_none());
+        assert!(runtime.handoff_history_ansi().unwrap().is_none());
     }
 
     #[cfg(unix)]
@@ -5471,6 +5529,7 @@ mod tests {
         ));
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let runtime = PaneRuntime {
+            shell_history_id: None,
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
             persistence_cwd: Mutex::new(None),
@@ -5511,6 +5570,7 @@ mod tests {
         ));
         let compression = TerminalCompressionTask::spawn(pane_id, terminal.clone());
         let runtime = PaneRuntime {
+            shell_history_id: None,
             self_reported_agent_active: Arc::new(AtomicBool::new(false)),
             cwd_process_exited: Arc::new(AtomicBool::new(false)),
             persistence_cwd: Mutex::new(None),

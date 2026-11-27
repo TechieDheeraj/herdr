@@ -1480,9 +1480,9 @@
       "keys": [
         {
           "key": "advanced.scrollback_limit_bytes",
-          "type": "integer",
+          "type": "integer | string",
           "default": "10000000",
-          "description": "Maximum scrollback buffer size in bytes retained per pane terminal. The legacy key name `scrollback_lines` is accepted as an alias."
+          "description": "Maximum primary-screen scrollback bytes per pane, or `\"unlimited\"` to remove the byte cap. Zero disables scrollback. Unlimited history grows in memory and, with `experimental.pane_history`, on disk. Applies to new or recreated terminals. The legacy key `scrollback_lines` remains an alias."
         }
       ]
     },

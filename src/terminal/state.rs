@@ -128,6 +128,7 @@ struct RecentAgentProcessExit {
 /// metadata.
 pub struct TerminalState {
     pub id: TerminalId,
+    pub(crate) shell_history_id: Option<crate::shell_history::ShellHistoryId>,
     pub cwd: PathBuf,
     pub detected_agent: Option<Agent>,
     pub fallback_state: AgentState,
@@ -168,6 +169,7 @@ impl TerminalState {
     pub fn new(id: TerminalId, cwd: PathBuf) -> Self {
         Self {
             id,
+            shell_history_id: None,
             cwd,
             detected_agent: None,
             fallback_state: AgentState::Unknown,
