@@ -1614,6 +1614,165 @@ fn live_handoff_recovers_only_the_conversation_owned_by_each_foreground_agent() 
 }
 
 #[test]
+fn live_handoff_recovers_idle_claude_records_without_open_transcripts() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config = base.join("config");
+    let runtime = base.join("runtime");
+    let socket = runtime.join("herdr.sock");
+    let claude_home = base.join("claude-home");
+    let project = claude_home.join("projects/shared-cwd");
+    let records = claude_home.join("sessions");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(&records).unwrap();
+    let server = spawn_server_with_env(
+        &config,
+        &runtime,
+        &socket,
+        &[
+            ("HERDR_SESSION", "claude-record-recovery"),
+            ("CLAUDE_CONFIG_DIR", claude_home.to_str().unwrap()),
+        ],
+    );
+    wait_for_socket(&socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime);
+    let mut panes = Vec::new();
+    // Every pane uses the same cwd. Only the first two have unambiguous,
+    // current records; none keeps its own transcript open.
+    for (index, mode) in [
+        "valid",
+        "valid",
+        "stale",
+        "foreign",
+        "conflict",
+        "duplicate",
+        "duplicate",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let suffix = if mode == "duplicate" { 5 } else { index };
+        let session_id = format!("01234567-89ab-cdef-0123-{suffix:012x}");
+        fs::write(project.join(format!("{session_id}.jsonl")), "").unwrap();
+        let workspace = request(
+            &socket,
+            serde_json::json!({"id":"create","method":"workspace.create","params":{"cwd":base,"focus":false}}),
+        );
+        let pane_id = workspace["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let descriptors = if mode == "conflict" {
+            format!(
+                "3>>{}",
+                project
+                    .join("01234567-89ab-cdef-0123-000000000000.jsonl")
+                    .display()
+            )
+        } else {
+            String::new()
+        };
+        assert_ok(request(
+            &socket,
+            serde_json::json!({"id":"run","method":"pane.send_input","params":{
+                "pane_id":pane_id,"text":format!("/bin/bash -c 'exec -a claude /bin/cat' {descriptors}"),"keys":["Enter"]
+            }}),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let pid = loop {
+            let pane = request(
+                &socket,
+                serde_json::json!({"id":"get","method":"pane.get","params":{"pane_id":pane_id}}),
+            );
+            if pane["result"]["pane"]["agent"] == "claude" {
+                assert!(pane["result"]["pane"]["agent_session"].is_null());
+                let info = request(
+                    &socket,
+                    serde_json::json!({"id":"info","method":"pane.process_info","params":{"pane_id":pane_id}}),
+                );
+                break info["result"]["process_info"]["foreground_process_group_id"]
+                    .as_u64()
+                    .unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Claude fixture not detected: {pane}"
+            );
+            thread::sleep(Duration::from_millis(30));
+        };
+        let start = std::process::Command::new("/bin/ps")
+            .args(["-o", "lstart=", "-p", &pid.to_string()])
+            .env("LC_ALL", "C")
+            .env("TZ", "UTC")
+            .output()
+            .unwrap();
+        assert!(start.status.success());
+        let domain = if std::env::consts::OS == "linux" {
+            format!(
+                "linux:{}:{}",
+                fs::read_to_string("/etc/machine-id").unwrap().trim(),
+                fs::read_link("/proc/self/ns/pid").unwrap().display()
+            )
+        } else {
+            "darwin".to_owned()
+        };
+        let record = serde_json::json!({
+            "pid":pid, "sessionId":session_id, "cwd":base,
+            "procStart": if mode == "stale" { "old-process" } else { std::str::from_utf8(&start.stdout).unwrap().trim() },
+            "pidDomain": if mode == "foreign" { "foreign-host" } else { &domain },
+            "kind":"interactive", "entrypoint":"cli"
+        });
+        fs::write(
+            records.join(format!("{pid}.json")),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        panes.push((pane_id, (mode == "valid").then_some(session_id)));
+    }
+    assert_ok(request(
+        &socket,
+        serde_json::json!({"id":"handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(server);
+    wait_for_api(&socket, Duration::from_secs(10));
+    for (id, expected) in &panes {
+        let pane = request(
+            &socket,
+            serde_json::json!({"id":"get","method":"pane.get","params":{"pane_id":id}}),
+        );
+        assert_eq!(
+            pane["result"]["pane"]["agent_session"]["value"].as_str(),
+            expected.as_deref(),
+            "pane {id}: {pane}"
+        );
+    }
+    let saved: serde_json::Value = serde_json::from_slice(
+        &fs::read(config.join("herdr-dev/sessions/claude-record-recovery/session.json")).unwrap(),
+    )
+    .unwrap();
+    let ids = saved["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|ws| ws["tabs"].as_array().unwrap())
+        .flat_map(|tab| tab["panes"].as_object().unwrap().values())
+        .filter_map(|pane| pane["agent_session"]["value"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        panes
+            .iter()
+            .filter_map(|(_, id)| id.as_deref())
+            .collect::<Vec<_>>()
+    );
+    assert_ok(request(
+        &socket,
+        serde_json::json!({"id":"stop","method":"server.stop","params":{}}),
+    ));
+    cleanup_test_base(&base);
+}
+
+#[test]
 fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     use std::os::unix::fs::PermissionsExt;
 

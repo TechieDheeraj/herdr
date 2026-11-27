@@ -66,7 +66,7 @@ pub(crate) fn write_existing_config(
     Ok(false)
 }
 
-pub(super) fn file_has_no_extended_acl(fd: std::os::fd::RawFd) -> bool {
+pub(crate) fn file_has_no_extended_acl(fd: std::os::fd::RawFd) -> bool {
     // Darwin extended ACLs can grant access independently of the mode bits.
     // These libc functions from <sys/acl.h> are absent from the Rust bindings.
     unsafe extern "C" {
@@ -1291,6 +1291,10 @@ pub fn process_start_token(pid: u32) -> Option<u64> {
 
 pub(crate) fn process_started_at(start_token: u64) -> Option<std::time::SystemTime> {
     std::time::UNIX_EPOCH.checked_add(Duration::from_micros(start_token))
+}
+
+pub(crate) fn claude_pid_domain() -> Option<String> {
+    Some("darwin".into())
 }
 
 /// Process group of `pid` while that same process, matched by its start

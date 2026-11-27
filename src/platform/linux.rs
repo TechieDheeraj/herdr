@@ -836,6 +836,21 @@ pub fn process_start_token(pid: u32) -> Option<u64> {
     process_job_stat(pid).map(|stat| stat.start_time)
 }
 
+pub(crate) fn claude_pid_domain() -> Option<String> {
+    let machine = std::fs::read_to_string("/etc/machine-id").ok()?;
+    let namespace = std::fs::read_link("/proc/self/ns/pid").ok()?;
+    let machine = machine.trim();
+    if machine.is_empty() {
+        return None;
+    }
+    Some(format!("linux:{machine}:{}", namespace.to_str()?))
+}
+
+pub(crate) fn file_has_no_extended_acl(_fd: RawFd) -> bool {
+    // The POSIX ACL mask is reflected in group mode bits, which callers check.
+    true
+}
+
 pub(crate) fn process_started_at(start_token: u64) -> Option<std::time::SystemTime> {
     use std::time::{Duration, SystemTime};
     // /proc/PID/stat field 22 is in clock ticks since boot. Round the process

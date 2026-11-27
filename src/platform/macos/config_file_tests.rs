@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn claude_session_metadata_rejects_acl_write_access_on_files_and_directories() {
+    use std::os::fd::AsRawFd;
+    let dir = std::env::temp_dir().join(format!("herdr-session-acl-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let record = dir.join("record.json");
+    std::fs::write(&record, b"{}").unwrap();
+    for (path, rule) in [
+        (&record, "everyone allow write"),
+        (&dir, "everyone allow add_file"),
+    ] {
+        let file = std::fs::File::open(path).unwrap();
+        assert!(file_has_no_extended_acl(file.as_raw_fd()));
+        assert!(Command::new("/bin/chmod")
+            .args(["+a", rule])
+            .arg(path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(!file_has_no_extended_acl(file.as_raw_fd()));
+        assert!(Command::new("/bin/chmod")
+            .arg("-N")
+            .arg(path)
+            .status()
+            .unwrap()
+            .success());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn config_replacement_preserves_macos_acl() {
     let dir = std::env::temp_dir().join(format!("herdr-config-acl-{}", std::process::id()));
     std::fs::create_dir(&dir).unwrap();

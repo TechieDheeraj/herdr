@@ -572,7 +572,8 @@ pub(crate) mod unix_image_files;
 #[cfg(unix)]
 pub(crate) use unix_common::{
     begin_cli_output, end_cli_output, forward_remote_bridge_stdio, ignore_server_hangup,
-    local_stream_peer_description, spawn_server_signal_monitor, ChildPipe, RemoteBridgeWake,
+    local_stream_peer_description, process_start_label, spawn_server_signal_monitor, ChildPipe,
+    RemoteBridgeWake,
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -615,6 +616,16 @@ pub(crate) fn writable_file_paths(_pid: u32) -> Option<Vec<std::path::PathBuf>> 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 pub(crate) fn process_started_at(_start_token: u64) -> Option<std::time::SystemTime> {
     None
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(crate) fn claude_pid_domain() -> Option<String> {
+    None
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(crate) fn file_has_no_extended_acl(_fd: std::os::fd::RawFd) -> bool {
+    false
 }
 
 #[cfg(unix)]

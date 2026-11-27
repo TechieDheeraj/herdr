@@ -1,5 +1,52 @@
 use std::path::{Path, PathBuf};
 
+/// Claude's Unix PID registry uses the C-locale UTC `ps lstart` label. Keep
+/// this metadata probe inside the handoff budget and reap a timed-out helper.
+pub(crate) fn process_start_label(pid: u32, deadline: std::time::Instant) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let mut child = Command::new("/bin/ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut label = String::new();
+                child
+                    .stdout
+                    .take()?
+                    .take(128)
+                    .read_to_string(&mut label)
+                    .ok()?;
+                let label = label.trim();
+                return (!label.is_empty() && label.len() < 128).then(|| label.to_owned());
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 pub(crate) struct ChildPipe(std::fs::File);
 
 impl ChildPipe {

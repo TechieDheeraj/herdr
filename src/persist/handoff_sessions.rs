@@ -11,6 +11,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+mod claude;
+
 #[derive(Clone, Copy)]
 struct PaneJob {
     shell: u32,
@@ -74,11 +76,16 @@ pub(crate) fn recover(
         let mut found = HashMap::new();
         for (pane, job) in targets {
             if Instant::now() >= deadline {
-                break;
+                // An unvisited pane could claim the same conversation. Do not
+                // publish a partial batch before checking all live owners.
+                return;
             }
             if let Some(claim) = stores.identify(job) {
                 found.insert(pane, claim);
             }
+        }
+        if Instant::now() >= deadline {
+            return;
         }
         let _ = tx.send(found);
     })
@@ -127,7 +134,7 @@ pub(crate) fn recover(
 }
 
 struct Stores {
-    claude: Option<PathBuf>,
+    claude: Option<claude::ClaudeStore>,
     codex: Option<PathBuf>,
     copilot: Option<PathBuf>,
     locks: OnceCell<Option<CopilotLocks>>,
@@ -141,7 +148,7 @@ impl Stores {
         Self {
             claude: integration::claude_dir()
                 .ok()
-                .and_then(|p| p.join("projects").canonicalize().ok()),
+                .and_then(|p| claude::ClaudeStore::new(&p)),
             codex: integration::codex_dir()
                 .ok()
                 .and_then(|p| p.join("sessions").canonicalize().ok()),
@@ -213,9 +220,21 @@ impl Stores {
                 return None;
             }
             let mut ids = HashSet::new();
+            // Inspection failure is different from an idle agent with no open
+            // transcripts: we must still be able to reject conflicting IDs.
             for path in platform::writable_file_paths(pid)? {
                 if let Some(id) = self.transcript_id(agent, &path) {
                     ids.insert(id);
+                }
+            }
+            if agent == Agent::Claude {
+                if let Some(store) = &self.claude {
+                    if let Some(id) = store.record_id(pid, birth, self.deadline) {
+                        if !store.has_transcript(&id, self.deadline) {
+                            return None;
+                        }
+                        ids.insert(id);
+                    }
                 }
             }
             if agent == Agent::GithubCopilot {
@@ -256,14 +275,7 @@ impl Stores {
         // Unlinked or renamed descriptors cannot identify a conversation the CLI
         // could reopen at this path. Check files only after matching the store.
         match agent {
-            Agent::Claude => {
-                let relative = path.strip_prefix(self.claude.as_ref()?).ok()?;
-                if relative.components().count() != 2 {
-                    return None;
-                }
-                let id = uuid(relative.file_name()?.to_str()?.strip_suffix(".jsonl")?)?;
-                owned_regular_file(path).then_some(id)
-            }
+            Agent::Claude => self.claude.as_ref()?.transcript_id(path),
             Agent::GithubCopilot => {
                 let relative = path.strip_prefix(self.copilot.as_ref()?).ok()?;
                 if relative.components().count() != 2 || relative.file_name()? != "events.jsonl" {
